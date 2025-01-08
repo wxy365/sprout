@@ -36,21 +36,6 @@ func (a *App[C]) Context() C {
 	return a.context
 }
 
-// todo 获取数据库
-func (a *App[C]) DB(dbName string) any {
-	return nil
-}
-
-// todo 获取分布式缓存组件
-func (a *App[C]) Cache(cacheName string) any {
-	return nil
-}
-
-// todo 获取客户端，特指http客户端
-func (a *App[C]) Client(cliName string) any {
-	return nil
-}
-
 type appInitializer[C any] func(app *App[C]) error
 
 type AppBuilder[C any] struct {

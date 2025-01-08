@@ -4,13 +4,13 @@ import "context"
 
 type Handler func(ctx context.Context, in any) (any, error)
 
-type Endpoint interface {
-	Named
-	Pattern() string
-	Methods() []string
-	Handler() Handler
-	InputEntity() any
-	Interceptors() []Interceptor
+type Endpoint struct {
+	Name         string
+	Pattern      string
+	Methods      []string
+	Handler      Handler
+	InputEntity  any
+	Interceptors []Interceptor
 }
 
 type BaseEndpoint struct {

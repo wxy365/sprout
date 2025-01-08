@@ -112,7 +112,7 @@ func buildHandler(endpoints []Endpoint) map[epSig]func(writer http.ResponseWrite
 		validateEp(ep)
 
 		epHandler := func(writer http.ResponseWriter, request *http.Request) error {
-			in := ep.InputEntity()
+			in := ep.InputEntity
 			serializer := request.Context().Value(ctxKeySerializer).(Serializer)
 			responseContentType := request.Context().Value(ctxKeyAcceptType).(string)
 			deserializer := request.Context().Value(ctxKeyDeserializer).(Deserializer)
@@ -184,10 +184,10 @@ func buildHandler(endpoints []Endpoint) map[epSig]func(writer http.ResponseWrite
 
 			serviceLogEnabled, _ := env.GetBool("SERVICE_LOG_ENABLED", false)
 			if serviceLogEnabled {
-				lei.Debug(`Endpoint "{0}" input: "{1}"`, ep.Name(), in)
+				lei.Debug(`Endpoint "{0}" input: "{1}"`, ep.Name, in)
 			}
 
-			out, err := ep.Handler()(request.Context(), in)
+			out, err := ep.Handler(request.Context(), in)
 			if err != nil {
 				r := request.WithContext(context.WithValue(request.Context(), ctxKeyEndpointError, err))
 				*request = *r
@@ -196,7 +196,7 @@ func buildHandler(endpoints []Endpoint) map[epSig]func(writer http.ResponseWrite
 
 			if out != nil {
 				if serviceLogEnabled {
-					lei.Debug(`Endpoint "{0}", output: "{1}"`, ep.Name(), out)
+					lei.Debug(`Endpoint "{0}", output: "{1}"`, ep.Name, out)
 				}
 				writer.Header().Set("Content-Type", responseContentType)
 				err = serializer(out, writer)
@@ -208,8 +208,8 @@ func buildHandler(endpoints []Endpoint) map[epSig]func(writer http.ResponseWrite
 		}
 
 		var ics []Interceptor
-		ics = append(ics, newCircuitBreakerInterceptor(ep.Name()), newRateLimiterInterceptor(ep.Name())) // append circuit breaker, rate limiter
-		ics = append(ics, ep.Interceptors()...)
+		ics = append(ics, newCircuitBreakerInterceptor(ep.Name), newRateLimiterInterceptor(ep.Name)) // append circuit breaker, rate limiter
+		ics = append(ics, ep.Interceptors...)
 
 		for i := len(ics); i > 0; i-- {
 			ic := ics[i-1]
@@ -227,10 +227,10 @@ func buildHandler(endpoints []Endpoint) map[epSig]func(writer http.ResponseWrite
 			}
 		}
 
-		for _, mth := range ep.Methods() {
+		for _, mth := range ep.Methods {
 			sig := epSig{
 				method:  mth,
-				pattern: ep.Pattern(),
+				pattern: ep.Pattern,
 			}
 			handlers[sig] = h
 		}
@@ -239,15 +239,15 @@ func buildHandler(endpoints []Endpoint) map[epSig]func(writer http.ResponseWrite
 }
 
 func validateEp(ep Endpoint) {
-	if reflect.TypeOf(ep.InputEntity()).Kind() != reflect.Pointer {
-		panic(fmt.Sprintf("The input entity of endpoint '%s' must be pointer kind", ep.Name()))
+	if reflect.TypeOf(ep.InputEntity).Kind() != reflect.Pointer {
+		panic(fmt.Sprintf("The input entity of endpoint '%s' must be pointer kind", ep.Name))
 	}
 	allowedMethods := []string{
 		http.MethodConnect, http.MethodGet, http.MethodHead,
 		http.MethodPut, http.MethodPost, http.MethodPatch,
 		http.MethodOptions, http.MethodTrace, http.MethodDelete,
 	}
-	for _, mth := range ep.Methods() {
+	for _, mth := range ep.Methods {
 		if slices.Lookup(allowedMethods, mth, func(left, right string) bool {
 			return left == right
 		}) < 0 {
