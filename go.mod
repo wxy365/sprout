@@ -1,8 +1,6 @@
 module github.com/wxy365/sprout
 
-go 1.22
-
-toolchain go1.23.3
+go 1.25
 
 require (
 	github.com/patrickmn/go-cache v2.1.0+incompatible

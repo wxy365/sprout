@@ -2,15 +2,16 @@ package sprout
 
 import (
 	"encoding/json"
-	"fmt"
-	"github.com/wxy365/basal/lei"
-	"github.com/wxy365/basal/rflt"
-	"github.com/wxy365/basal/text"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"reflect"
 	"strconv"
+
+	"github.com/wxy365/basal/errs"
+	"github.com/wxy365/basal/log"
+	"github.com/wxy365/basal/rflt"
+	"github.com/wxy365/basal/text"
 )
 
 var (
@@ -32,24 +33,10 @@ const (
 )
 
 func SerializeJson(model any, w http.ResponseWriter) error {
-	var raw []byte
-	var err error
-	if e, ok := model.(error); ok {
-		if er, ok := e.(*lei.Err); ok {
-			raw = []byte(er.Error())
-			if er.Status > 0 {
-				w.WriteHeader(er.Status)
-			}
-		} else {
-			raw = []byte(fmt.Sprintf("{message:%s}", e.Error()))
-		}
-	} else {
-		raw, err = json.Marshal(model)
-		if err != nil {
-			return err
-		}
+	raw, err := json.Marshal(model)
+	if err != nil {
+		return err
 	}
-
 	_, err = io.WriteString(w, string(raw))
 	if err != nil {
 		return err
@@ -70,7 +57,7 @@ func DeserializeJson(r *http.Request, model any) error {
 
 func SerializeMultipartForm(model any, w http.ResponseWriter) error {
 	writer := multipart.NewWriter(w)
-	if e, ok := model.(*lei.Err); ok {
+	if e, ok := model.(*errs.Err); ok {
 		if e.Code != "" {
 			err := writer.WriteField("code", e.Code)
 			if err != nil {
@@ -156,7 +143,7 @@ func DeserializeMultipartForm(r *http.Request, model any) error {
 			switch fv.Kind() {
 			case reflect.Slice:
 				if fv.Type().Elem().Kind() != reflect.Uint8 {
-					return lei.New(`The field "{0}" of model "{1}" is supposed to be of []byte or io.Reader type`, k, mv.Type().Name())
+					return errs.New(`The field [{0}] of model [{1}] is supposed to be of []byte or io.Reader type`, k, mv.Type().Name())
 				}
 				file, err := v[0].Open()
 				if err != nil {
@@ -170,7 +157,7 @@ func DeserializeMultipartForm(r *http.Request, model any) error {
 			case reflect.Interface:
 				var sample io.Reader
 				if !fv.Type().Implements(reflect.TypeOf(sample)) {
-					return lei.New(`The field "{0}" of model "{1}" is supposed to be of []byte or io.Reader type`, k, mv.Type().Name())
+					return errs.New(`The field [{0}] of model [{1}] is supposed to be of []byte or io.Reader type`, k, mv.Type().Name())
 				}
 				file, err := v[0].Open()
 				if err != nil {
@@ -180,17 +167,26 @@ func DeserializeMultipartForm(r *http.Request, model any) error {
 			}
 		}
 	} else {
-		return lei.New("Form data boundary is not specified")
+		return errs.New("Form data boundary is not specified")
 	}
 	return nil
 }
 
-func AddSerializer(contentType string, serializer Serializer) {
+func RegisterSerializer(contentType string, serializer Serializer) {
 	switch contentType {
 	case MimeJson, MimeHtml, MimeText, MimeMultipartForm, MimeUrlencodedForm, MimePdf:
 		serializers[contentType] = serializer
 	default:
-		panic("Unknown content type: " + contentType)
+		log.Panic("Content type {0} not supported", contentType)
+	}
+}
+
+func RegisterDeserializer(contentType string, deserializer Deserializer) {
+	switch contentType {
+	case MimeJson, MimeHtml, MimeText, MimeMultipartForm, MimeUrlencodedForm, MimePdf:
+		deserializers[contentType] = deserializer
+	default:
+		log.Panic("Content type {0} not supported", contentType)
 	}
 }
 

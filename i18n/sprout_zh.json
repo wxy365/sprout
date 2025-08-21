@@ -1,0 +1,7 @@
+{
+  "sprout.params.required": "{0} 是必须的",
+  "sprout.params.require-one": "【{0}】中至少有一个是必须的",
+  "sprout.params.out-of-range": "{0} 超出范围: {1} ~ {2}",
+  "sprout.params.out-of-length": "{0} 长度超出范围: {1} ~ {2}",
+  "sprout.params.invalid-email": "无效的邮箱地址: {0}"
+}

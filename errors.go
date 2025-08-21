@@ -1,11 +1,12 @@
 package sprout
 
 import (
-	"github.com/wxy365/basal/lei"
 	"net/http"
+
+	"github.com/wxy365/basal/errs"
 )
 
 var (
-	ErrRateLimited   = lei.New("Too many request").WithCode("RATE_LIMITED").WithStatus(http.StatusTooManyRequests)
-	ErrCircuitBroken = lei.New("The request was blocked").WithCode("CIRCUIT_BROKEN").WithStatus(http.StatusInternalServerError)
+	ErrRateLimited   = errs.New("Too many request").WithCode("RATE_LIMITED").WithStatus(http.StatusTooManyRequests)
+	ErrCircuitBroken = errs.New("The request was blocked").WithCode("CIRCUIT_BROKEN").WithStatus(http.StatusInternalServerError)
 )

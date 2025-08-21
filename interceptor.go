@@ -2,17 +2,22 @@ package sprout
 
 import (
 	"errors"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/patrickmn/go-cache"
-	"github.com/wxy365/basal/env"
-	"github.com/wxy365/basal/lei"
+	"github.com/sony/gobreaker"
+	"github.com/wxy365/basal/cfg/def"
+	"github.com/wxy365/basal/errs"
+	"github.com/wxy365/basal/log"
 	"github.com/wxy365/basal/tp"
 	"golang.org/x/time/rate"
-	"net/http"
-	"time"
 )
-import "github.com/sony/gobreaker"
 
-type Interceptor func(next func(w http.ResponseWriter, r *http.Request) error) func(w http.ResponseWriter, r *http.Request) error
+type Interceptor func(next func(*Context) error) func(ctx *Context) error
 
 type circuitBreakerSettings struct {
 	MaxRequests            uint32        `json:"max_requests"`
@@ -23,12 +28,12 @@ type circuitBreakerSettings struct {
 }
 
 func getCircuitBreakerSettings(breakerName string) *circuitBreakerSettings {
-	scbs, _ := env.GetObj[map[string]*circuitBreakerSettings]("SPROUT_CIRCUIT_BREAKER_SETTINGS")
+	scbs, _ := def.GetObj[map[string]circuitBreakerSettings]("app.breakers")
 	if len(scbs) == 0 {
 		return nil
 	}
 	if cbs, ok := scbs[breakerName]; ok {
-		return cbs
+		return &cbs
 	}
 	return nil
 }
@@ -44,12 +49,12 @@ func newCircuitBreaker(cbs *circuitBreakerSettings) *gobreaker.TwoStepCircuitBre
 			return counts.ConsecutiveFailures >= cbs.MaxConsecutiveFailures && ratio >= cbs.MaxFailureRatio
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
-			lei.Info("Circuit breaker state changed, name: '{0}', from: '{1}', to: '{2}'", name, from, to)
+			log.Info("Circuit breaker state changed, Name: [{0}], from: [{1}], to: [{2}]", name, from, to)
 		},
 	})
 }
 
-// newCircuitBreakerInterceptor creates a circuit breaker with the given name.
+// newCircuitBreakerInterceptor creates a circuit breaker with the given Name.
 // If the settings for the breaker is not configured, then the default settings is applied.
 func newCircuitBreakerInterceptor(breakerName string) Interceptor {
 	cbs := getCircuitBreakerSettings(breakerName)
@@ -63,17 +68,17 @@ func newCircuitBreakerInterceptor(breakerName string) Interceptor {
 		}
 	}
 	breaker := newCircuitBreaker(cbs)
-	return func(next func(w http.ResponseWriter, r *http.Request) error) func(w http.ResponseWriter, r *http.Request) error {
-		return func(w http.ResponseWriter, r *http.Request) error {
+	return func(next func(ctx *Context) error) func(ctx *Context) error {
+		return func(ctx *Context) error {
 			done, err := breaker.Allow()
 			if err != nil {
 				return ErrCircuitBroken
 			}
 			defer func() {
 				isSuccessful := true
-				if er := r.Context().Value(ctxKeyEndpointError); er != nil {
+				if er := ctx.Value(ctxKeyEndpointError); er != nil {
 					err = er.(error)
-					var e *lei.Err
+					var e *errs.Err
 					if errors.As(err, &e) {
 						if e.Status >= http.StatusInternalServerError {
 							isSuccessful = false
@@ -82,7 +87,7 @@ func newCircuitBreakerInterceptor(breakerName string) Interceptor {
 				}
 				done(isSuccessful)
 			}()
-			return next(w, r)
+			return next(ctx)
 		}
 	}
 }
@@ -99,7 +104,7 @@ func RegisterClientIdentifier(name string, identifier ClientIdentifier) {
 	clientIdentifiers[name] = identifier
 }
 
-// The rate limiter controls the traffic at both the source (client) and the server interface simultaneously
+// The rate limiter controls the traffic at both the client and the server interface simultaneously
 func newRateLimiterInterceptor(limiterName string) Interceptor {
 	rls := getRateLimiterSettings(limiterName)
 	var clientLimiters *cache.Cache
@@ -125,16 +130,16 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 
 	clientIdentifier := clientIdentifiers[rls.ClientIdentifierType]
 	if clientIdentifier == nil {
-		clientIdentifier = tp.GetUserIp
+		clientIdentifier = tp.GetClientIp
 	}
 
-	return func(next func(w http.ResponseWriter, r *http.Request) error) func(w http.ResponseWriter, r *http.Request) error {
-		return func(w http.ResponseWriter, r *http.Request) error {
+	return func(next func(ctx *Context) error) func(ctx *Context) error {
+		return func(ctx *Context) error {
 			if !serverLimiter.Allow() {
 				return ErrRateLimited
 			}
 			if clientLimiters != nil {
-				clientIdentity := clientIdentifier(r)
+				clientIdentity := clientIdentifier(ctx.Request)
 				var clientLimiter *rate.Limiter
 				if cached, exists := clientLimiters.Get(clientIdentity); !exists {
 					clientLimiter = rate.NewLimiter(rls.ClientTokenRate, rls.ClientTokenBucketSize)
@@ -146,7 +151,7 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 					return ErrRateLimited
 				}
 			}
-			return next(w, r)
+			return next(ctx)
 		}
 	}
 }
@@ -165,7 +170,7 @@ type rateLimiterSettings struct {
 }
 
 func getRateLimiterSettings(limiterName string) *rateLimiterSettings {
-	srls, _ := env.GetObj[map[string]*rateLimiterSettings]("SPROUT_RATE_LIMITER_SETTINGS")
+	srls, _ := def.GetObj[map[string]*rateLimiterSettings]("app.limiters")
 	if len(srls) == 0 {
 		return nil
 	}
@@ -173,4 +178,61 @@ func getRateLimiterSettings(limiterName string) *rateLimiterSettings {
 		return cbs
 	}
 	return nil
+}
+
+func newCorsInterceptor() Interceptor {
+	corsSettings := getCorsSettings()
+	if corsSettings == nil {
+		return nil
+	}
+	return func(next func(*Context) error) func(ctx *Context) error {
+		return func(ctx *Context) error {
+			origin := ctx.Request.Header.Get("Origin")
+			if origin != "" && len(corsSettings.AllowOrigins) > 0 {
+				for _, allowOrigin := range corsSettings.AllowOrigins {
+					if origin == allowOrigin || strings.HasSuffix(origin, allowOrigin) {
+						ctx.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+					} else {
+						originUrl, err := url.Parse(origin)
+						if err != nil {
+							return errs.Wrap(err, "failed to parse origin")
+						}
+						allowOriginUrl, _ := url.Parse(allowOrigin)
+						if originUrl.Scheme == allowOriginUrl.Scheme && strings.HasSuffix(originUrl.Host, strings.Replace(allowOriginUrl.Host, "*", "", -1)) {
+							ctx.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+						}
+					}
+				}
+			}
+			if len(corsSettings.AllowMethods) > 0 {
+				ctx.Writer.Header().Set("Access-Control-Allow-Methods", strings.Join(corsSettings.AllowMethods, ","))
+			}
+			if len(corsSettings.AllowHeaders) > 0 {
+				ctx.Writer.Header().Set("Access-Control-Allow-Headers", strings.Join(corsSettings.AllowHeaders, ","))
+			}
+			if corsSettings.AllowCredentials != nil && *corsSettings.AllowCredentials {
+				ctx.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
+			if corsSettings.MaxAge > 0 {
+				ctx.Writer.Header().Set("Access-Control-Max-Age", strconv.Itoa(corsSettings.MaxAge))
+			}
+			return next(ctx)
+		}
+	}
+}
+
+func getCorsSettings() *corsSettings {
+	cs, _ := def.GetObj[*corsSettings]("app.cors")
+	if cs == nil {
+		return &corsSettings{}
+	}
+	return cs
+}
+
+type corsSettings struct {
+	AllowOrigins     []string `json:"allow_origins"`
+	AllowMethods     []string `json:"allow_methods"`
+	AllowHeaders     []string `json:"allow_headers"`
+	AllowCredentials *bool    `json:"allow_credentials"`
+	MaxAge           int      `json:"max_age"`
 }

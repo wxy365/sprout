@@ -3,12 +3,6 @@ package cli
 import (
 	"context"
 	"crypto/tls"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
-	"github.com/wxy365/basal/lei"
-	"github.com/wxy365/basal/rflt"
-	sp "github.com/wxy365/sprout"
-	"golang.org/x/net/http2"
 	"io"
 	"mime"
 	"net"
@@ -16,6 +10,13 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+	"github.com/wxy365/basal/errs"
+	"github.com/wxy365/basal/rflt"
+	sp "github.com/wxy365/sprout"
+	"golang.org/x/net/http2"
 )
 
 type Client struct {
@@ -105,7 +106,7 @@ func (c *Client) Do(ctx context.Context, method, url, contentType string, in, ou
 func makeUrlAndBody(url, contentType string, in any) (string, io.Reader, error) {
 	serializer := serializers[contentType]
 	if serializer == nil {
-		return "", nil, lei.New("Serializer not found for content type: {0}", contentType)
+		return "", nil, errs.New("Serializer not found for content type: {0}", contentType)
 	}
 	v := reflect.ValueOf(in).Elem()
 	t := reflect.TypeOf(in).Elem()
@@ -120,7 +121,7 @@ func makeUrlAndBody(url, contentType string, in any) (string, io.Reader, error) 
 			if err != nil {
 				return "", nil, err
 			}
-			url = strings.Replace(url, "{"+pname+"}", valStr, 1)
+			url = strings.Replace(url,"{"+pname+"}", valStr, 1)
 		} else if pname, ok := f.Tag.Lookup("query"); ok {
 			valStr, err := rflt.ValueToString(fv)
 			if err != nil {
@@ -177,7 +178,7 @@ func resolveHttpResponse(resp *http.Response, out any) error {
 	}
 	deserializer := deserializers[respContentType]
 	if deserializer == nil {
-		return lei.New("No deserializer found for content type: {0}", respContentType)
+		return errs.New("No deserializer found for content type: {0}], respContentType)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		err = deserializer(resp.Body, params, out)
@@ -185,7 +186,7 @@ func resolveHttpResponse(resp *http.Response, out any) error {
 			return err
 		}
 	} else {
-		e := new(lei.Err)
+		e := new(errs.Err)
 		e.WithStatus(resp.StatusCode)
 		err = deserializer(resp.Body, params, e)
 		if err != nil {

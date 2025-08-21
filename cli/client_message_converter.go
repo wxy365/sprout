@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/wxy365/basal/lei"
 	"io"
+
+	"github.com/wxy365/basal/errs"
 )
 
 var (
@@ -30,13 +31,13 @@ func DeserializeJson(r io.Reader, params map[string]string, model any) error {
 	if err != nil {
 		return err
 	}
-	if e, ok := model.(*lei.Err); ok {
+	if e, ok := model.(*errs.Err); ok {
 		return deserializeError(raw, e)
 	}
 	return json.Unmarshal(raw, model)
 }
 
-func deserializeError(raw []byte, e *lei.Err) error {
+func deserializeError(raw []byte, e *errs.Err) error {
 	dto := make(map[string]any)
 	err := json.Unmarshal(raw, &dto)
 	if err != nil {
@@ -46,7 +47,7 @@ func deserializeError(raw []byte, e *lei.Err) error {
 	return e
 }
 
-func map2Err(m map[string]any, err *lei.Err) {
+func map2Err(m map[string]any, err *errs.Err) {
 	if code, exists := m["code"]; exists {
 		err.Code = fmt.Sprintf("%+v", code)
 	}
@@ -58,11 +59,11 @@ func map2Err(m map[string]any, err *lei.Err) {
 	}
 	if cause, exists := m["cause"]; exists {
 		if m1, ok := cause.(map[string]any); ok {
-			var err1 *lei.Err
+			var err1 *errs.Err
 			map2Err(m1, err1)
 			err.Cause = err1
 		} else {
-			err.Cause = lei.New(fmt.Sprintf("%+v", cause))
+			err.Cause = errs.New(fmt.Sprintf("%+v", cause))
 		}
 	}
 }

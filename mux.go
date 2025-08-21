@@ -2,37 +2,38 @@ package sprout
 
 import (
 	"context"
-	"fmt"
-	"github.com/wxy365/basal/ds/slices"
-	"github.com/wxy365/basal/lei"
 	"mime"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/wxy365/basal/ds/slices"
+	"github.com/wxy365/basal/errs"
+	"github.com/wxy365/basal/log"
 )
 
 type mux struct {
 	root *rootSection
 }
 
-func newMux(handlers map[epSig]func(http.ResponseWriter, *http.Request)) *mux {
+func newMux(handlers map[epSig]func(*Context)) *mux {
 	m := &mux{}
 	if len(handlers) == 0 {
-		panic("No handler specified when creating new http route mux")
+		log.Panic("No handler specified when creating new http route mux")
 	}
 	m.root = &rootSection{
 		baseSection{
 			lvl:     0,
 			patn:    "/",
-			hdlrMap: make(map[string]func(http.ResponseWriter, *http.Request)),
+			hdlrMap: make(map[string]func(*Context)),
 		},
 	}
 	// scan for endpoints with pattern "/"
 	for e, h := range handlers {
 		if e.pattern == "/" {
 			if _, exists := m.root.hdlrMap[e.method]; exists {
-				panic(fmt.Sprintf("Duplicate endpoint definitions with the same uri pattern(/) and methods(%s)", e.method))
+				log.Panic("Duplicate endpoint definitions with the same uri pattern(/) and methods({0})", e.method)
 			}
 			m.root.hdlrMap[e.method] = h
 			delete(handlers, e)
@@ -54,7 +55,7 @@ func newMux(handlers map[epSig]func(http.ResponseWriter, *http.Request)) *mux {
 	return m
 }
 
-func addSection(parent section, i int, parts []string, method string, h func(writer http.ResponseWriter, request *http.Request)) {
+func addSection(parent section, i int, parts []string, method string, h func(*Context)) {
 	if i >= len(parts) {
 		return
 	}
@@ -65,7 +66,7 @@ func addSection(parent section, i int, parts []string, method string, h func(wri
 			if i == len(parts)-1 {
 				if len(chdn.handlerMap()) > 0 {
 					if _, exists := chdn.handlerMap()[method]; exists {
-						panic(fmt.Sprintf("Duplicate endpoint definitions with the same uri pattern(/%s) and method(%s)", strings.Join(parts, "/"), method))
+						log.Panic("Duplicate endpoint definitions with the same uri pattern(/{0}) and method({1}})", strings.Join(parts, "/"), method)
 					}
 				}
 				chdn.addHandler(method, h)
@@ -83,7 +84,7 @@ func addSection(parent section, i int, parts []string, method string, h func(wri
 	}
 }
 
-func newSection(parent section, i int, parts []string, method string, h func(writer http.ResponseWriter, request *http.Request)) section {
+func newSection(parent section, i int, parts []string, method string, h func(ctx *Context)) section {
 	var s section
 	isEndPart := i == len(parts)-1
 	pattern := parts[i]
@@ -94,22 +95,22 @@ func newSection(parent section, i int, parts []string, method string, h func(wri
 	}
 	expNamed, err := regexp.Compile("\\{\\w+}")
 	if err != nil {
-		panic(err)
+		log.PanicErr(err)
 	}
 	expNamedRegexp, err := regexp.Compile("\\{\\w+:~[\\s\\S]+}")
 	if err != nil {
-		panic(err)
+		log.PanicErr(err)
 	}
 	expStatic, err := regexp.Compile("[\\w.-]+")
 	if err != nil {
-		panic(err)
+		log.PanicErr(err)
 	}
 	if pattern == "*" {
 		s = &matchAllSection{base}
 	} else if strings.HasPrefix(pattern, "~") {
 		reg, err := regexp.Compile(pattern[1:])
 		if err != nil {
-			panic(err)
+			log.PanicErr(err)
 		}
 		s = &regexpSection{
 			baseSection: base,
@@ -137,7 +138,7 @@ func newSection(parent section, i int, parts []string, method string, h func(wri
 		t := strings.Split(expr, ":")
 		rexp, err := regexp.Compile(t[1][1:])
 		if err != nil {
-			panic(err)
+			log.PanicErr(err)
 		}
 		s = &namedRegexpSection{
 			baseSection: base,
@@ -171,12 +172,11 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		acceptType = MimeJson
 	}
 	serializer := serializers[acceptType]
-	logAndSerialize := func(er error) {
-		lei.ErrorErr(er)
+	serialize := func(er error) {
 		err = serializer(er, w)
 		// this should never happen
 		if err != nil {
-			panic(lei.Wrap("Error in serializing error message", err))
+			log.ErrorErrF("Error in serializing error message", err)
 		}
 	}
 
@@ -194,8 +194,13 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(context.WithValue(r.Context(), ctxKeyContentTypeParams, params))
 	}
 
+	ctx := &Context{
+		Request: r,
+		Writer:  w,
+	}
+
 	if m.root == nil {
-		logAndSerialize(lei.New("No endpoint defined").WithStatus(http.StatusNotFound))
+		serialize(errs.New("No endpoint defined").WithStatus(http.StatusNotFound))
 		return
 	}
 	path := r.URL.Path
@@ -205,9 +210,9 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rootFm, _, _ := m.root.finalMatch(r.Method, "")
 	if path == "" || path == "/" {
 		if rootFm {
-			m.root.handler(r.Method)(w, r)
+			m.root.handler(r.Method)(ctx)
 		} else {
-			logAndSerialize(lei.New("Resource not found").WithStatus(http.StatusNotFound))
+			serialize(errs.New("Resource not found").WithStatus(http.StatusNotFound))
 			return
 		}
 		return
@@ -228,7 +233,7 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if *theOne == nil {
-		logAndSerialize(lei.New("Resource not found").WithStatus(http.StatusNotFound))
+		serialize(errs.New("Resource not found").WithStatus(http.StatusNotFound))
 		return
 	}
 	if len(pathParams) > 0 {
@@ -242,7 +247,7 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(context.WithValue(r.Context(), ctxKeyPathParams, pm))
 	}
 
-	(*theOne).handler(r.Method)(w, r)
+	(*theOne).handler(r.Method)(ctx)
 }
 
 func match(s section, idx int, uriParts []string, method string, pathParams map[section][2]string, theOne *section) {
@@ -272,18 +277,18 @@ type section interface {
 	weight() int
 	parent() section
 	children() []section
-	handler(method string) func(writer http.ResponseWriter, request *http.Request)
-	handlerMap() map[string]func(writer http.ResponseWriter, request *http.Request)
+	handler(method string) func(ctx *Context)
+	handlerMap() map[string]func(ctx *Context)
 	pattern() string
-	addHandler(method string, h func(writer http.ResponseWriter, request *http.Request))
+	addHandler(method string, h func(ctx *Context))
 	addChild(section)
 }
 
 type baseSection struct {
 	lvl     int
-	prnt    section                                                            // parent section
-	chdn    []section                                                          // children sections. a tail section has no children
-	hdlrMap map[string]func(writer http.ResponseWriter, request *http.Request) // http endpoint handler, only tail section has handler
+	prnt    section                       // parent section
+	chdn    []section                     // children sections. a tail section has no children
+	hdlrMap map[string]func(ctx *Context) // http endpoint handler, only tail section has handler
 	patn    string
 }
 
@@ -313,7 +318,7 @@ func (b *baseSection) children() []section {
 	return b.chdn
 }
 
-func (b *baseSection) handler(method string) func(http.ResponseWriter, *http.Request) {
+func (b *baseSection) handler(method string) func(ctx *Context) {
 	return b.hdlrMap[method]
 }
 
@@ -325,13 +330,13 @@ func (b *baseSection) pattern() string {
 	return b.patn
 }
 
-func (b *baseSection) handlerMap() map[string]func(http.ResponseWriter, *http.Request) {
+func (b *baseSection) handlerMap() map[string]func(ctx *Context) {
 	return b.hdlrMap
 }
 
-func (b *baseSection) addHandler(method string, h func(writer http.ResponseWriter, request *http.Request)) {
+func (b *baseSection) addHandler(method string, h func(ctx *Context)) {
 	if len(b.hdlrMap) == 0 {
-		b.hdlrMap = make(map[string]func(w http.ResponseWriter, r *http.Request))
+		b.hdlrMap = make(map[string]func(ctx *Context))
 	}
 	method = strings.ToUpper(method)
 	allowedMethods := []string{
@@ -342,7 +347,7 @@ func (b *baseSection) addHandler(method string, h func(writer http.ResponseWrite
 	if slices.Lookup(allowedMethods, method, func(left, right string) bool {
 		return left == right
 	}) == -1 {
-		panic("Http method '" + method + "' not allowed")
+		log.Panic("Http method [{0}] not allowed", method)
 	}
 	b.hdlrMap[method] = h
 }

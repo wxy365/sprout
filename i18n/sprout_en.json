@@ -1,0 +1,7 @@
+{
+  "sprout.params.required": "The {0} is required",
+  "sprout.params.require-one": "At least one of [{0}] is required",
+  "sprout.params.out-of-range": "The {0} is out of range: {1} ~ {2}",
+  "sprout.params.out-of-length": "The {0} is out of length: {1} ~ {2}",
+  "sprout.params.invalid-email": "Invalid email address: {0}"
+}

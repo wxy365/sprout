@@ -2,296 +2,209 @@ package sprout
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/quic-go/quic-go/http3"
-	"github.com/wxy365/basal/ds/slices"
-	"github.com/wxy365/basal/env"
-	"github.com/wxy365/basal/lei"
-	"github.com/wxy365/basal/rflt"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/quic-go/quic-go/http3"
+	"github.com/wxy365/basal/log"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 type Server struct {
-	started bool
-	name    string
-	port    int32
-	mux     *mux
+	Name            string
+	Port            uint16
+	CertFile        string
+	KeyFile         string
+	Debug           bool
+	ShutdownTimeout time.Duration
+
+	Validators   []Validator
+	ErrorHandler ErrorHandler
+
+	endpoints []*refinedEndpoint
 }
 
-func (s *Server) Name() string {
-	return s.name
+func newDefaultServer(name string) *Server {
+	return &Server{
+		Name:            name,
+		Debug:           false,
+		ShutdownTimeout: 10 * time.Second,
+		Validators:      defaultValidators(),
+		ErrorHandler:    defaultErrHandler,
+	}
 }
 
-func (s *Server) Start() {
-	if s.started {
-		return
-	}
-	certCfgJson, err := env.GetStr("TLS_CERT_CFG", "")
-	if err != nil {
-		panic(err)
-	}
-	var gracefulShutdownHook func(timeout time.Duration)
-	if certCfgJson == "" {
-		server := &http.Server{
-			Addr:    fmt.Sprintf(":%d", s.port),
-			Handler: h2c.NewHandler(s.mux, &http2.Server{}),
+func (s *Server) start() {
+	mx := s.buildMux()
+	var gracefulShutdown func(timeout time.Duration)
+	if s.CertFile == "" || s.KeyFile == "" {
+		if s.Port == 0 {
+			s.Port = 80
 		}
-		err = server.ListenAndServe()
+		server := &http.Server{
+			Addr:    fmt.Sprintf(":%d", s.Port),
+			Handler: h2c.NewHandler(mx, &http2.Server{}),
+		}
+		gracefulShutdown = func(timeout time.Duration) {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			err := server.Shutdown(ctx)
+			if err != nil {
+				log.PanicErrF("Failed to shutdown sprout server gracefully", err)
+			}
+		}
+
+		fmt.Printf("'%s' is started on port: %d\n", s.Name, s.Port)
+
+		err := server.ListenAndServe()
 		if err != nil {
 			server.Close()
-			panic(err)
-		}
-		gracefulShutdownHook = func(timeout time.Duration) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			err = server.Shutdown(ctx)
-			if err != nil {
-				lei.PanicErrF("Failed to shutdown sprout server gracefully", err)
-			}
+			log.PanicErr(err)
 		}
 	} else {
-		certCfg := make(map[string]string)
-		err = json.Unmarshal([]byte(certCfgJson), &certCfg)
-		if err != nil {
-			return
-		}
-		certFile := certCfg["cert_file"]
-		if certFile == "" {
-			panic("The tls certification file path is not specified")
-		}
-		keyFile := certCfg["key_file"]
-		if keyFile == "" {
-			panic("The tls key file path is not specified")
-		}
-		if s.port == 0 {
-			s.port = 443
+		if s.Port == 0 {
+			s.Port = 443
 		}
 		server := http3.Server{
-			Addr: fmt.Sprintf(":%d", s.port),
+			Addr: fmt.Sprintf(":%d", s.Port),
 		}
-		err = server.ListenAndServeTLS(certFile, keyFile)
-		if err != nil {
-			server.Close()
-			panic(err)
-		}
-		gracefulShutdownHook = func(timeout time.Duration) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		gracefulShutdown = func(timeout time.Duration) {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			err = server.Shutdown(ctx)
+			err := server.Shutdown(ctx)
 			if err != nil {
-				lei.PanicErrF("Failed to shutdown sprout server gracefully", err)
+				log.PanicErrF("Failed to shutdown sprout server gracefully", err)
 			}
 		}
+
+		fmt.Printf("'%s' is started on port: %d\n", s.Name, s.Port)
+
+		err := server.ListenAndServeTLS(s.CertFile, s.KeyFile)
+		if err != nil {
+			server.Close()
+			log.PanicErr(err)
+		}
 	}
-	s.started = true
+
+	fmt.Printf("'%s' is shutting down", s.Name)
 
 	// graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	gracefulShutdownHook(time.Second * 10)
+	gracefulShutdown(s.ShutdownTimeout)
 }
 
-// signature of endpoint: http method and path pattern contained
+func (s *Server) buildMux() *mux {
+	handlers := make(map[epSig]func(*Context))
+	for _, ep := range s.endpoints {
+		h := func(ctx *Context) {
+			err := ep.httpHandler(ctx)
+			if err != nil {
+				serializer := ctx.Value(ctxKeySerializer).(Serializer)
+				err = serializer(err, ctx.Writer)
+				if err != nil {
+					log.ErrorErrF("Failed to serialize error message", err)
+				}
+			}
+		}
+
+		for _, mth := range ep.methods {
+			sig := epSig{
+				method:  mth,
+				pattern: ep.pattern,
+			}
+			handlers[sig] = h
+		}
+	}
+	return newMux(handlers)
+}
+
 type epSig struct {
 	method  string
 	pattern string
 }
 
-func buildHandler(endpoints []Endpoint) map[epSig]func(writer http.ResponseWriter, request *http.Request) {
-	handlers := make(map[epSig]func(writer http.ResponseWriter, request *http.Request))
-	for _, ep := range endpoints {
-		validateEp(ep)
-
-		epHandler := func(writer http.ResponseWriter, request *http.Request) error {
-			in := ep.InputEntity
-			serializer := request.Context().Value(ctxKeySerializer).(Serializer)
-			responseContentType := request.Context().Value(ctxKeyAcceptType).(string)
-			deserializer := request.Context().Value(ctxKeyDeserializer).(Deserializer)
-
-			if in != nil {
-				// parse body
-				err := deserializer(request, in)
-				if err != nil {
-					return err
+func (s *Server) buildInputEntityValidateFuncs(inputType reflect.Type) ObjectValidateFunc {
+	fieldVdFuncs := make([]ValidateFunc, inputType.NumField())
+	for i := 0; i < inputType.NumField(); i++ {
+		f := inputType.Field(i)
+		validateTag := f.Tag.Get("validate")
+		validateTag = strings.TrimSpace(validateTag)
+		if validateTag != "" {
+			for _, v := range s.Validators {
+				if vdFunc := v.ValidateFunc(validateTag, i, inputType); vdFunc != nil {
+					if fieldVdFuncs[i] == nil {
+						fieldVdFuncs[i] = vdFunc
+					} else {
+						fvdFunc := fieldVdFuncs[i]
+						fieldVdFuncs[i] = func(ctx context.Context, fieldIdx int, struValue reflect.Value) error {
+							err := fvdFunc(ctx, fieldIdx, struValue)
+							if err != nil {
+								return err
+							}
+							return vdFunc(ctx, fieldIdx, struValue)
+						}
+					}
 				}
+			}
+		}
 
-				// parse header、query、cookie
-				iv := reflect.ValueOf(in).Elem()
-				for i := 0; i < iv.NumField(); i++ {
-					fv := iv.Field(i)
-					tag := iv.Type().Field(i).Tag
-					var valStr *string
-					if def, ok := tag.Lookup("default"); ok && fv.IsZero() {
-						valStr = &def
+		fieldType := f.Type
+		for fieldType.Kind() == reflect.Pointer {
+			fieldType = fieldType.Elem()
+		}
+		if fieldType.Kind() == reflect.Struct {
+			nestVdFunc := s.buildInputEntityValidateFuncs(fieldType)
+			if nestVdFunc != nil {
+				if fieldVdFuncs[i] == nil {
+					fieldVdFuncs[i] = func(ctx context.Context, fieldIdx int, struValue reflect.Value) error {
+						return nestVdFunc(ctx, struValue.Field(fieldIdx))
 					}
-
-					var queryMap map[string]string
-					if key, ok := tag.Lookup("path"); ok {
-						pathParams := request.Context().Value(ctxKeyPathParams)
-						if pathParams != nil {
-							if val, exists := pathParams.(map[string]string)[key]; exists {
-								valStr = &val
-							}
-						}
-					}
-					if valStr == nil {
-						if key, ok := tag.Lookup("query"); ok {
-							if len(queryMap) == 0 {
-								queryMap = make(map[string]string)
-								for k, v := range request.URL.Query() {
-									queryMap[k] = v[0]
-								}
-							}
-							if val, exists := queryMap[key]; exists {
-								valStr = &val
-							}
-						}
-						if valStr == nil {
-							if key, ok := tag.Lookup("header"); ok {
-								val := request.Header.Get(key)
-								if val != "" {
-									valStr = &val
-								}
-							}
-							if valStr == nil {
-								if key, ok := tag.Lookup("cookie"); ok {
-									cookie, err := request.Cookie(key)
-									if err == nil {
-										val := cookie.String()
-										valStr = &val
-									}
-								}
-							}
-						}
-					}
-					if valStr != nil {
-						err = rflt.UnmarshalValue(fv, *valStr)
+				} else {
+					fvdFunc := fieldVdFuncs[i]
+					fieldVdFuncs[i] = func(ctx context.Context, fieldIdx int, struValue reflect.Value) error {
+						err := fvdFunc(ctx, fieldIdx, struValue)
 						if err != nil {
 							return err
 						}
+						return nestVdFunc(ctx, struValue.Field(fieldIdx))
 					}
 				}
 			}
-
-			serviceLogEnabled, _ := env.GetBool("SERVICE_LOG_ENABLED", false)
-			if serviceLogEnabled {
-				lei.Debug(`Endpoint "{0}" input: "{1}"`, ep.Name, in)
-			}
-
-			out, err := ep.Handler(request.Context(), in)
-			if err != nil {
-				r := request.WithContext(context.WithValue(request.Context(), ctxKeyEndpointError, err))
-				*request = *r
-				return err
-			}
-
-			if out != nil {
-				if serviceLogEnabled {
-					lei.Debug(`Endpoint "{0}", output: "{1}"`, ep.Name, out)
-				}
-				writer.Header().Set("Content-Type", responseContentType)
-				err = serializer(out, writer)
+		}
+	}
+	if len(fieldVdFuncs) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, obj reflect.Value) error {
+		for obj.Kind() == reflect.Pointer {
+			obj = obj.Elem()
+		}
+		for i := 0; i < obj.NumField(); i++ {
+			if fieldVdFuncs[i] != nil {
+				err := fieldVdFuncs[i](ctx, i, obj)
 				if err != nil {
 					return err
 				}
 			}
-			return nil
 		}
-
-		var ics []Interceptor
-		ics = append(ics, newCircuitBreakerInterceptor(ep.Name), newRateLimiterInterceptor(ep.Name)) // append circuit breaker, rate limiter
-		ics = append(ics, ep.Interceptors...)
-
-		for i := len(ics); i > 0; i-- {
-			ic := ics[i-1]
-			epHandler = ic(epHandler)
-		}
-
-		h := func(w http.ResponseWriter, r *http.Request) {
-			err := epHandler(w, r)
-			if err != nil {
-				serializer := r.Context().Value(ctxKeySerializer).(Serializer)
-				err = serializer(err, w)
-				if err != nil {
-					lei.ErrorErrF("Failed to serialize error message", err)
-				}
-			}
-		}
-
-		for _, mth := range ep.Methods {
-			sig := epSig{
-				method:  mth,
-				pattern: ep.Pattern,
-			}
-			handlers[sig] = h
-		}
-	}
-	return handlers
-}
-
-func validateEp(ep Endpoint) {
-	if reflect.TypeOf(ep.InputEntity).Kind() != reflect.Pointer {
-		panic(fmt.Sprintf("The input entity of endpoint '%s' must be pointer kind", ep.Name))
-	}
-	allowedMethods := []string{
-		http.MethodConnect, http.MethodGet, http.MethodHead,
-		http.MethodPut, http.MethodPost, http.MethodPatch,
-		http.MethodOptions, http.MethodTrace, http.MethodDelete,
-	}
-	for _, mth := range ep.Methods {
-		if slices.Lookup(allowedMethods, mth, func(left, right string) bool {
-			return left == right
-		}) < 0 {
-			panic("Invalid http method: " + mth)
-		}
+		return nil
 	}
 }
 
-type ServerBuilder struct {
-	server    *Server
-	done      bool
-	name      string
-	port      int32
-	endpoints []Endpoint
-}
-
-func NewServerBuilder() *ServerBuilder {
-	return &ServerBuilder{}
-}
-
-func (s *ServerBuilder) Build() *Server {
-	if !s.done {
-		s.server = &Server{
-			name: s.name,
-			port: s.port,
-		}
-		handlers := buildHandler(s.endpoints)
-		s.server.mux = newMux(handlers)
-		s.done = true
-	}
-	return s.server
-}
-
-func (s *ServerBuilder) Name(name string) *ServerBuilder {
-	s.name = name
-	return s
-}
-
-func (s *ServerBuilder) Port(port int32) *ServerBuilder {
-	s.port = port
-	return s
-}
-
-func (s *ServerBuilder) AddEndpoint(e ...Endpoint) *ServerBuilder {
-	s.endpoints = append(s.endpoints, e...)
-	return s
+type svrCfg struct {
+	Name            string `json:"Name"`
+	Port            uint16 `json:"Port"`
+	CertFile        string `json:"cert_file"`
+	KeyFile         string `json:"key_file"`
+	Debug           *bool  `json:"debug"`
+	ShutdownTimeout uint64 `json:"shutdown_timeout"`
 }
