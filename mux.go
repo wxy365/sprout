@@ -93,15 +93,15 @@ func newSection(parent section, i int, parts []string, method string, h func(ctx
 		prnt: parent,
 		patn: pattern,
 	}
-	expNamed, err := regexp.Compile("\\{\\w+}")
+	expNamed, err := regexp.Compile(`\{\w+}`)
 	if err != nil {
 		log.PanicErr(err)
 	}
-	expNamedRegexp, err := regexp.Compile("\\{\\w+:~[\\s\\S]+}")
+	expNamedRegexp, err := regexp.Compile(`\{\w+:~[\s\S]+}`)
 	if err != nil {
 		log.PanicErr(err)
 	}
-	expStatic, err := regexp.Compile("[\\w.-]+")
+	expStatic, err := regexp.Compile(`[\w.-]+`)
 	if err != nil {
 		log.PanicErr(err)
 	}

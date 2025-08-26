@@ -121,7 +121,7 @@ func makeUrlAndBody(url, contentType string, in any) (string, io.Reader, error) 
 			if err != nil {
 				return "", nil, err
 			}
-			url = strings.Replace(url,"{"+pname+"}", valStr, 1)
+			url = strings.Replace(url, "{"+pname+"}", valStr, 1)
 		} else if pname, ok := f.Tag.Lookup("query"); ok {
 			valStr, err := rflt.ValueToString(fv)
 			if err != nil {
@@ -178,7 +178,7 @@ func resolveHttpResponse(resp *http.Response, out any) error {
 	}
 	deserializer := deserializers[respContentType]
 	if deserializer == nil {
-		return errs.New("No deserializer found for content type: {0}], respContentType)
+		return errs.New("No deserializer found for content type: {0}", respContentType)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		err = deserializer(resp.Body, params, out)
