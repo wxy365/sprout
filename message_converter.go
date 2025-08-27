@@ -37,7 +37,7 @@ func SerializeJson(model any, w http.ResponseWriter) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.WriteString(w, string(raw))
+	_, err = w.Write(raw)
 	if err != nil {
 		return err
 	}
