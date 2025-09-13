@@ -201,10 +201,10 @@ func (s *Server) buildInputEntityValidateFuncs(inputType reflect.Type) ObjectVal
 }
 
 type svrCfg struct {
-	Name            string `json:"Name"`
-	Port            uint16 `json:"Port"`
-	CertFile        string `json:"cert_file"`
-	KeyFile         string `json:"key_file"`
-	Debug           *bool  `json:"debug"`
-	ShutdownTimeout uint64 `json:"shutdown_timeout"`
+	Name            string `map:"name"`
+	Port            uint16 `map:"port"`
+	CertFile        string `map:"cert_file"`
+	KeyFile         string `map:"key_file"`
+	Debug           *bool  `map:"debug"`
+	ShutdownTimeout uint64 `map:"shutdown_timeout"` // in milliseconds
 }

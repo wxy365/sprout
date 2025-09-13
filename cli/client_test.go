@@ -2,10 +2,11 @@ package cli
 
 import (
 	"context"
-	sp "github.com/wxy365/sprout"
 	"net/http"
 	"testing"
 	"time"
+
+	sp "github.com/wxy365/sprout"
 )
 
 func TestDoer(t *testing.T) {

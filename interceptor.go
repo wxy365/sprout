@@ -20,11 +20,11 @@ import (
 type Interceptor func(next func(*Context) error) func(ctx *Context) error
 
 type circuitBreakerSettings struct {
-	MaxRequests            uint32        `json:"max_requests"`
-	Interval               time.Duration `json:"interval"`
-	Timeout                time.Duration `json:"timeout"`
-	MaxConsecutiveFailures uint32        `json:"max_consecutive_failures"`
-	MaxFailureRatio        float64       `json:"failure_ratio"`
+	MaxRequests            uint32        `map:"max_requests"`
+	Interval               time.Duration `map:"interval"`
+	Timeout                time.Duration `map:"timeout"`
+	MaxConsecutiveFailures uint32        `map:"max_consecutive_failures"`
+	MaxFailureRatio        float64       `map:"failure_ratio"`
 }
 
 func getCircuitBreakerSettings(breakerName string) *circuitBreakerSettings {
@@ -160,13 +160,13 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 // Each endpoint has its own token bucket, and each client has its own token bucket as well.
 type rateLimiterSettings struct {
 	// limitation to server
-	TokenRate       rate.Limit `json:"token_rate"` // rate of token generation, eg. 2 - 2 events every sec; 0.5 - 1 event every 2 sec
-	TokenBucketSize int        `json:"token_bucket_size"`
+	TokenRate       rate.Limit `map:"token_rate"` // rate of token generation, eg. 2 - 2 events every sec; 0.5 - 1 event every 2 sec
+	TokenBucketSize int        `map:"token_bucket_size"`
 
 	// limitation to client
-	ClientIdentifierType  string // eg. "IP"
-	ClientTokenRate       rate.Limit
-	ClientTokenBucketSize int
+	ClientIdentifierType  string     `map:"client_identifier_type"` // eg. "IP"
+	ClientTokenRate       rate.Limit `map:"client_token_rate"`
+	ClientTokenBucketSize int        `map:"client_token_bucket_size"`
 }
 
 func getRateLimiterSettings(limiterName string) *rateLimiterSettings {
@@ -230,9 +230,9 @@ func getCorsSettings() *corsSettings {
 }
 
 type corsSettings struct {
-	AllowOrigins     []string `json:"allow_origins"`
-	AllowMethods     []string `json:"allow_methods"`
-	AllowHeaders     []string `json:"allow_headers"`
-	AllowCredentials *bool    `json:"allow_credentials"`
-	MaxAge           int      `json:"max_age"`
+	AllowOrigins     []string `map:"allow_origins"`
+	AllowMethods     []string `map:"allow_methods"`
+	AllowHeaders     []string `map:"allow_headers"`
+	AllowCredentials *bool    `map:"allow_credentials"`
+	MaxAge           int      `map:"max_age"`
 }

@@ -71,7 +71,7 @@ func (a *App[C]) init() {
 		appCtx := reflect.New(t.Elem()).Interface()
 		a.Context = appCtx.(C)
 	}
-	initAppContextAttribute[C](a)
+	initAppContextAttribute(a)
 
 	svrCfgs, err := def.GetObj[[]svrCfg]("app.servers")
 	if err != nil && !cfg.IsCfgMissingErr(err) {
@@ -83,7 +83,7 @@ func (a *App[C]) init() {
 		}
 		var svrCreated bool
 		for _, svr := range a.Servers {
-			if svr.Name == scfg.Name {
+			if svr.Name == scfg.Name { // the configruation has higher priority
 				svrCreated = true
 				if scfg.Port > 0 {
 					svr.Port = scfg.Port

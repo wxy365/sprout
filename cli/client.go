@@ -32,7 +32,7 @@ func NewClient(timeout time.Duration) *Client {
 }
 
 func NewH3Client(timeout time.Duration) *Client {
-	roundTripper := &http3.RoundTripper{
+	roundTripper := &http3.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
