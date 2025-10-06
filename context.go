@@ -1,9 +1,10 @@
 package sprout
 
 import (
-	"github.com/wxy365/basal/tp"
 	"net/http"
 	"time"
+
+	"github.com/wxy365/basal/tp"
 )
 
 type Context struct {
@@ -31,28 +32,28 @@ func (c *Context) ClientIP() string {
 	return tp.GetClientIp(c.Request)
 }
 
-type ctxKeyTypePathParams uint8
+type ctxKeyTypePathParams struct{}
 
 var ctxKeyPathParams ctxKeyTypePathParams
 
-type ctxKeyTypeSerializer uint8
+type ctxKeyTypeSerializer struct{}
 
 var ctxKeySerializer ctxKeyTypeSerializer
 
-type ctxKeyTypeAcceptType uint8
+type ctxKeyTypeAcceptType struct{}
 
 var ctxKeyAcceptType ctxKeyTypeAcceptType
 
-type ctxKeyTypeDeserializer uint8
+type ctxKeyTypeDeserializer struct{}
 
 var ctxKeyDeserializer ctxKeyTypeDeserializer
 
 // Content-Type header 附带的其他参数，比如multipart/form-data;boundary=-----WebKitFormBoundary7MA4YWxkTrZu0gW
 // 附带的参数名为boundary，值为-----WebKitFormBoundary7MA4YWxkTrZu0gW
-type ctxKeyTypeContentTypeParams uint8
+type ctxKeyTypeContentTypeParams struct{}
 
 var ctxKeyContentTypeParams ctxKeyTypeContentTypeParams
 
-type ctxKeyTypeEndpointError uint8
+type ctxKeyTypeEndpointError struct{}
 
 var ctxKeyEndpointError ctxKeyTypeEndpointError
