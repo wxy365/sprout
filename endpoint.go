@@ -116,7 +116,7 @@ func (e *Endpoint[I, O]) appendToServer(svr *Server, decrypters map[string]func(
 		return nil
 	}
 
-	var ics []Interceptor
+	ics := []Interceptor{recoverInterceptor}
 	circuitBreaker := newCircuitBreakerInterceptor(r.name)
 	if circuitBreaker != nil {
 		ics = append(ics, circuitBreaker)

@@ -236,3 +236,15 @@ type corsSettings struct {
 	AllowCredentials *bool    `map:"allow_credentials"`
 	MaxAge           int      `map:"max_age"`
 }
+
+func recoverInterceptor(next func(ctx *Context) error) func(ctx *Context) error {
+	return func(ctx *Context) error {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("Panic recovered in endpoint: {0} {1}", ctx.Request.Method, ctx.Request.URL.Path)
+				defaultErrHandler(ctx, errs.New("Internal Server Error").WithStatus(http.StatusInternalServerError))
+			}
+		}()
+		return next(ctx)
+	}
+}
