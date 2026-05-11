@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	urlpkg "net/url"
 	"reflect"
 	"strings"
 	"time"
@@ -32,9 +33,13 @@ func NewClient(timeout time.Duration) *Client {
 }
 
 func NewH3Client(timeout time.Duration) *Client {
+	return NewH3ClientWithTLS(timeout, false)
+}
+
+func NewH3ClientWithTLS(timeout time.Duration, insecureSkipVerify bool) *Client {
 	roundTripper := &http3.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: insecureSkipVerify,
 		},
 		DisableCompression: false,
 		QUICConfig: &quic.Config{
@@ -129,9 +134,9 @@ func makeUrlAndBody(url, contentType string, in any) (string, io.Reader, error) 
 			}
 			if valStr != "" {
 				if strings.Contains(url, "?") {
-					url = url + "&" + pname + "=" + valStr
+					url = url + "&" + pname + "=" + urlpkg.QueryEscape(valStr)
 				} else {
-					url = url + "?" + pname + "=" + valStr
+					url = url + "?" + pname + "=" + urlpkg.QueryEscape(valStr)
 				}
 			}
 		} else if pname, ok := f.Tag.Lookup("header"); ok {

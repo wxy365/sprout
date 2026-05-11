@@ -43,7 +43,11 @@ func newDefaultServer(name string) *Server {
 
 func (s *Server) start() {
 	mx := s.buildMux()
-	var gracefulShutdown func(timeout time.Duration)
+
+	// set up signal handling before starting the server
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
 	if s.CertFile == "" || s.KeyFile == "" {
 		if s.Port == 0 {
 			s.Port = 80
@@ -52,20 +56,20 @@ func (s *Server) start() {
 			Addr:    fmt.Sprintf(":%d", s.Port),
 			Handler: h2c.NewHandler(mx, &http2.Server{}),
 		}
-		gracefulShutdown = func(timeout time.Duration) {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+		go func() {
+			<-quit
+			fmt.Printf("'%s' is shutting down\n", s.Name)
+			ctx, cancel := context.WithTimeout(context.Background(), s.ShutdownTimeout)
 			defer cancel()
-			err := server.Shutdown(ctx)
-			if err != nil {
-				log.PanicErrF("Failed to shutdown sprout server gracefully", err)
+			if err := server.Shutdown(ctx); err != nil {
+				log.PanicErrF("Failed to shutdown server gracefully", err)
 			}
-		}
+		}()
 
 		fmt.Printf("'%s' is started on port: %d\n", s.Name, s.Port)
-
 		err := server.ListenAndServe()
-		if err != nil {
-			server.Close()
+		if err != nil && err != http.ErrServerClosed {
 			log.PanicErr(err)
 		}
 	} else {
@@ -75,31 +79,23 @@ func (s *Server) start() {
 		server := http3.Server{
 			Addr: fmt.Sprintf(":%d", s.Port),
 		}
-		gracefulShutdown = func(timeout time.Duration) {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+		go func() {
+			<-quit
+			fmt.Printf("'%s' is shutting down\n", s.Name)
+			ctx, cancel := context.WithTimeout(context.Background(), s.ShutdownTimeout)
 			defer cancel()
-			err := server.Shutdown(ctx)
-			if err != nil {
-				log.PanicErrF("Failed to shutdown sprout server gracefully", err)
+			if err := server.Shutdown(ctx); err != nil {
+				log.PanicErrF("Failed to shutdown server gracefully", err)
 			}
-		}
+		}()
 
 		fmt.Printf("'%s' is started on port: %d\n", s.Name, s.Port)
-
 		err := server.ListenAndServeTLS(s.CertFile, s.KeyFile)
-		if err != nil {
-			server.Close()
+		if err != nil && err != http.ErrServerClosed {
 			log.PanicErr(err)
 		}
 	}
-
-	fmt.Printf("'%s' is shutting down", s.Name)
-
-	// graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	gracefulShutdown(s.ShutdownTimeout)
 }
 
 func (s *Server) buildMux() *mux {

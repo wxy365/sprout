@@ -42,11 +42,6 @@ type Endpoint[I any, O any] struct {
 
 func (e *Endpoint[I, O]) appendToServer(svr *Server, decrypters map[string]func(cipher []byte) ([]byte, error)) {
 	// validate endpoint methods
-	allowedMethods := []string{
-		http.MethodConnect, http.MethodGet, http.MethodHead,
-		http.MethodPut, http.MethodPost, http.MethodPatch,
-		http.MethodOptions, http.MethodTrace, http.MethodDelete,
-	}
 	for _, mth := range e.Methods {
 		if slices.Lookup(allowedMethods, mth, func(left, right string) bool {
 			return left == right
@@ -118,13 +113,9 @@ func (e *Endpoint[I, O]) appendToServer(svr *Server, decrypters map[string]func(
 
 	ics := []Interceptor{recoverInterceptor}
 	circuitBreaker := newCircuitBreakerInterceptor(r.name)
-	if circuitBreaker != nil {
-		ics = append(ics, circuitBreaker)
-	}
+	ics = append(ics, circuitBreaker)
 	rateLimiter := newRateLimiterInterceptor(r.name)
-	if rateLimiter != nil {
-		ics = append(ics, rateLimiter)
-	}
+	ics = append(ics, rateLimiter)
 	corsInterceptor := newCorsInterceptor()
 	if corsInterceptor != nil {
 		ics = append(ics, corsInterceptor)

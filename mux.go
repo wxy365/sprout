@@ -13,6 +13,17 @@ import (
 	"github.com/wxy365/basal/log"
 )
 
+var (
+	allowedMethods = []string{
+		http.MethodConnect, http.MethodGet, http.MethodHead,
+		http.MethodPut, http.MethodPost, http.MethodPatch,
+		http.MethodOptions, http.MethodTrace, http.MethodDelete,
+	}
+	expNamed       = regexp.MustCompile(`\{\w+}`)
+	expNamedRegexp = regexp.MustCompile(`\{\w+:~[\s\S]+}`)
+	expStatic      = regexp.MustCompile(`[\w.-]+`)
+)
+
 type mux struct {
 	root *rootSection
 }
@@ -41,9 +52,7 @@ func newMux(handlers map[epSig]func(*Context)) *mux {
 	}
 	for e, h := range handlers {
 		pattern := strings.TrimSpace(e.pattern)
-		for strings.Contains(pattern, "//") {
-			pattern = strings.ReplaceAll(pattern, "//", "/")
-		}
+		pattern = strings.ReplaceAll(pattern, "//", "/")
 		parts := strings.Split(pattern, "/")
 		if len(parts) > 0 {
 			if parts[0] == "" {
@@ -93,18 +102,6 @@ func newSection(parent section, i int, parts []string, method string, h func(ctx
 		prnt: parent,
 		patn: pattern,
 	}
-	expNamed, err := regexp.Compile(`\{\w+}`)
-	if err != nil {
-		log.PanicErr(err)
-	}
-	expNamedRegexp, err := regexp.Compile(`\{\w+:~[\s\S]+}`)
-	if err != nil {
-		log.PanicErr(err)
-	}
-	expStatic, err := regexp.Compile(`[\w.-]+`)
-	if err != nil {
-		log.PanicErr(err)
-	}
 	if pattern == "*" {
 		s = &matchAllSection{base}
 	} else if strings.HasPrefix(pattern, "~") {
@@ -116,14 +113,14 @@ func newSection(parent section, i int, parts []string, method string, h func(ctx
 			baseSection: base,
 			exp:         reg,
 		}
-	} else if strings.EqualFold(pattern, "%s") {
+	} else if pattern == "%s" {
 		s = &formatSection{
 			baseSection: base,
 			validator: func(s string) bool {
 				return s != ""
 			},
 		}
-	} else if strings.EqualFold(pattern, "%d") {
+	} else if pattern == "%d" {
 		s = &formatSection{
 			baseSection: base,
 			validator: func(s string) bool {
@@ -203,10 +200,7 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serialize(errs.New("No endpoint defined").WithStatus(http.StatusNotFound))
 		return
 	}
-	path := r.URL.Path
-	for strings.Contains(path, "//") {
-		path = strings.ReplaceAll(path, "//", "/")
-	}
+	path := strings.ReplaceAll(r.URL.Path, "//", "/")
 	rootFm, _, _ := m.root.finalMatch(r.Method, "")
 	if path == "" || path == "/" {
 		if rootFm {
@@ -339,11 +333,6 @@ func (b *baseSection) addHandler(method string, h func(ctx *Context)) {
 		b.hdlrMap = make(map[string]func(ctx *Context))
 	}
 	method = strings.ToUpper(method)
-	allowedMethods := []string{
-		http.MethodConnect, http.MethodGet, http.MethodHead,
-		http.MethodPut, http.MethodPost, http.MethodPatch,
-		http.MethodOptions, http.MethodTrace, http.MethodDelete,
-	}
 	if slices.Lookup(allowedMethods, method, func(left, right string) bool {
 		return left == right
 	}) == -1 {

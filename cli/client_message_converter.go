@@ -49,21 +49,31 @@ func deserializeError(raw []byte, e *errs.Err) error {
 
 func map2Err(m map[string]any, err *errs.Err) {
 	if code, exists := m["code"]; exists {
-		err.Code = fmt.Sprintf("%+v", code)
+		if s, ok := code.(string); ok {
+			err.Code = s
+		} else {
+			err.Code = fmt.Sprint(code)
+		}
 	}
 	if msg, exists := m["message"]; exists {
-		err.Message = fmt.Sprintf("%+v", msg)
+		if s, ok := msg.(string); ok {
+			err.Message = s
+		} else {
+			err.Message = fmt.Sprint(msg)
+		}
 	}
 	if status, exists := m["status"]; exists {
-		err.Status = status.(int)
+		if f, ok := status.(float64); ok {
+			err.Status = int(f)
+		}
 	}
 	if cause, exists := m["cause"]; exists {
 		if m1, ok := cause.(map[string]any); ok {
-			var err1 *errs.Err
+			err1 := new(errs.Err)
 			map2Err(m1, err1)
 			err.Cause = err1
 		} else {
-			err.Cause = errs.New(fmt.Sprintf("%+v", cause))
+			err.Cause = errs.New(fmt.Sprint(cause))
 		}
 	}
 }

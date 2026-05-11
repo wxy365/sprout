@@ -8,9 +8,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wxy365/basal/errs"
 )
+
+var emailRegex = regexp.MustCompile(`^[\w-]+(\.[\w-]+)*@[\w-]+(\.[\w-]+)+$`)
 
 func defaultValidators() []Validator {
 	return []Validator{
@@ -98,7 +101,7 @@ func (e *EitherValidator) ValidateFunc(validateTag string, fieldIdx int, struTyp
 				return nil
 			}
 			var validFieldNames []string
-			for _, fieldName := range strings.Split(frag, ",") {
+			for _, fieldName := range strings.Split(fieldNames, ",") {
 				_, ok := struType.FieldByName(fieldName)
 				if ok {
 					validFieldNames = append(validFieldNames, fieldName)
@@ -303,7 +306,7 @@ func (s *StringLengthValidator) ValidateFunc(validateTag string, fieldIdx int, s
 	}
 	return func(ctx context.Context, fieldIdx int, struValue reflect.Value) error {
 		fieldValue := struValue.Field(fieldIdx).String()
-		fieldLen := len([]rune(fieldValue))
+		fieldLen := utf8.RuneCountInString(fieldValue)
 		if minLen > 0 {
 			if (fieldLen < minLen) || (!ge && fieldLen == minLen) {
 				return errs.I18nNew(ctx, "sprout.params.out-of-length", field.Name, minLen, maxLen).WithStatus(http.StatusBadRequest)
@@ -324,10 +327,9 @@ func (e *EmailValidator) ValidateFunc(validateTag string, fieldIdx int, struType
 	for _, frag := range strings.Split(validateTag, ";") {
 		frag = strings.TrimSpace(frag)
 		if frag == "email" {
-			reg := regexp.MustCompile(`^[\w-]+(\.[\w-]+)*@[\w-]+(\.[\w-]+)+$`)
 			return func(ctx context.Context, fieldIdx int, struValue reflect.Value) error {
 				fieldValue := struValue.Field(fieldIdx).String()
-				if !reg.MatchString(fieldValue) {
+				if !emailRegex.MatchString(fieldValue) {
 					return errs.I18nNew(ctx, "sprout.params.invalid-email", fieldValue).WithStatus(http.StatusBadRequest)
 				}
 				return nil

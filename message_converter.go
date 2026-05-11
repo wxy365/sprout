@@ -33,15 +33,7 @@ const (
 )
 
 func SerializeJson(model any, w http.ResponseWriter) error {
-	raw, err := json.Marshal(model)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(raw)
-	if err != nil {
-		return err
-	}
-	return nil
+	return json.NewEncoder(w).Encode(model)
 }
 
 func DeserializeJson(r *http.Request, model any) error {
@@ -110,7 +102,11 @@ func SerializeMultipartForm(model any, w http.ResponseWriter) error {
 				}
 			}
 		} else {
-			err := writer.WriteField(text.Pascal2Snake(field.Name), fv.String())
+			valStr, valErr := rflt.ValueToString(fv)
+			if valErr != nil {
+				return valErr
+			}
+			err := writer.WriteField(text.Pascal2Snake(field.Name), valStr)
 			if err != nil {
 				return err
 			}

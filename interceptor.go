@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/patrickmn/go-cache"
@@ -95,13 +96,16 @@ func newCircuitBreakerInterceptor(breakerName string) Interceptor {
 var (
 	// This map contains the names and function definitions of client identifier, used in client rate limiting.
 	// Callers can register client identifiers to this map through RegisterClientIdentifier.
-	clientIdentifiers = make(map[string]ClientIdentifier)
+	clientIdentifiers   = make(map[string]ClientIdentifier)
+	clientIdentifiersMu sync.RWMutex
 )
 
 type ClientIdentifier func(*http.Request) string
 
 func RegisterClientIdentifier(name string, identifier ClientIdentifier) {
+	clientIdentifiersMu.Lock()
 	clientIdentifiers[name] = identifier
+	clientIdentifiersMu.Unlock()
 }
 
 // The rate limiter controls the traffic at both the client and the server interface simultaneously
@@ -128,7 +132,9 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 	}
 	serverLimiter := rate.NewLimiter(rls.TokenRate, rls.TokenBucketSize)
 
+	clientIdentifiersMu.RLock()
 	clientIdentifier := clientIdentifiers[rls.ClientIdentifierType]
+	clientIdentifiersMu.RUnlock()
 	if clientIdentifier == nil {
 		clientIdentifier = tp.GetClientIp
 	}
@@ -185,11 +191,19 @@ func newCorsInterceptor() Interceptor {
 	if corsSettings == nil {
 		return nil
 	}
+	// pre-parse allowed origin URLs
+	parsedOrigins := make([]*url.URL, len(corsSettings.AllowOrigins))
+	for i, allowOrigin := range corsSettings.AllowOrigins {
+		u, err := url.Parse(allowOrigin)
+		if err == nil {
+			parsedOrigins[i] = u
+		}
+	}
 	return func(next func(*Context) error) func(ctx *Context) error {
 		return func(ctx *Context) error {
 			origin := ctx.Request.Header.Get("Origin")
 			if origin != "" && len(corsSettings.AllowOrigins) > 0 {
-				for _, allowOrigin := range corsSettings.AllowOrigins {
+				for i, allowOrigin := range corsSettings.AllowOrigins {
 					if origin == allowOrigin || strings.HasSuffix(origin, allowOrigin) {
 						ctx.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 					} else {
@@ -197,8 +211,7 @@ func newCorsInterceptor() Interceptor {
 						if err != nil {
 							return errs.Wrap(err, "failed to parse origin")
 						}
-						allowOriginUrl, _ := url.Parse(allowOrigin)
-						if originUrl.Scheme == allowOriginUrl.Scheme && strings.HasSuffix(originUrl.Host, strings.Replace(allowOriginUrl.Host, "*", "", -1)) {
+						if parsedOrigins[i] != nil && originUrl.Scheme == parsedOrigins[i].Scheme && strings.HasSuffix(originUrl.Host, strings.Replace(parsedOrigins[i].Host, "*", "", -1)) {
 							ctx.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 						}
 					}
