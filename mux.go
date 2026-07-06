@@ -52,7 +52,9 @@ func newMux(handlers map[epSig]func(*Context)) *mux {
 	}
 	for e, h := range handlers {
 		pattern := strings.TrimSpace(e.pattern)
+		for strings.Contains(pattern, "//") {
 		pattern = strings.ReplaceAll(pattern, "//", "/")
+	}
 		parts := strings.Split(pattern, "/")
 		if len(parts) > 0 {
 			if parts[0] == "" {
@@ -169,6 +171,9 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		acceptType = MimeJson
 	}
 	serializer := serializers[acceptType]
+	if serializer == nil {
+		serializer = serializers[MimeJson]
+	}
 	serialize := func(er error) {
 		err = serializer(er, w)
 		// this should never happen
@@ -258,8 +263,10 @@ func match(s section, idx int, uriParts []string, method string, pathParams map[
 		if len(k) > 0 {
 			pathParams[s] = [2]string{k, v}
 		}
-		for _, chdn := range s.children() {
-			match(chdn, idx+1, uriParts, method, pathParams, theOne)
+		if idx+1 < len(uriParts) {
+			for _, chdn := range s.children() {
+				match(chdn, idx+1, uriParts, method, pathParams, theOne)
+			}
 		}
 	}
 }

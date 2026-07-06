@@ -7,27 +7,38 @@ import (
 	"github.com/wxy365/basal/tp"
 )
 
+// Context wraps an HTTP request and response writer, providing convenience
+// methods that delegate to the underlying request context. It implements
+// a subset of the context.Context interface.
 type Context struct {
+	// Request is the incoming HTTP request.
 	Request *http.Request
-	Writer  http.ResponseWriter
+	// Writer is the response writer used to send the HTTP response.
+	Writer http.ResponseWriter
 }
 
+// Deadline returns the deadline of the underlying request context.
 func (c *Context) Deadline() (deadline time.Time, ok bool) {
 	return c.Request.Context().Deadline()
 }
 
+// Done returns the done channel of the underlying request context.
 func (c *Context) Done() <-chan struct{} {
 	return c.Request.Context().Done()
 }
 
+// Err returns the error of the underlying request context, if any.
 func (c *Context) Err() error {
 	return c.Request.Context().Err()
 }
 
+// Value returns the value associated with key from the underlying request context.
 func (c *Context) Value(key any) any {
 	return c.Request.Context().Value(key)
 }
 
+// ClientIP returns the client IP address by inspecting the request headers
+// (e.g. X-Forwarded-For, X-Real-IP) and falling back to the remote address.
 func (c *Context) ClientIP() string {
 	return tp.GetClientIp(c.Request)
 }

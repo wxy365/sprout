@@ -17,15 +17,31 @@ import (
 	"golang.org/x/net/http2/h2c"
 )
 
+// Server represents an HTTP server instance managed by the application.
+// It holds network configuration, validator chains, error handlers, and the
+// collection of registered endpoints.
 type Server struct {
-	Name            string
-	Port            uint16
-	CertFile        string
-	KeyFile         string
-	Debug           bool
+	// Name is the server name, used for configuration matching and logging.
+	Name string
+	// Port is the TCP port the server listens on. Defaults to 80 for HTTP and
+	// 443 for HTTPS/QUIC when not explicitly set.
+	Port uint16
+	// CertFile is the path to the TLS certificate file. When set alongside
+	// KeyFile, the server uses HTTP/3 (QUIC) with TLS; otherwise HTTP/2 h2c.
+	CertFile string
+	// KeyFile is the path to the TLS private key file.
+	KeyFile string
+	// Debug enables debug-level request logging for endpoints on this server.
+	Debug bool
+	// ShutdownTimeout is the maximum duration to wait for in-flight requests
+	// to complete during graceful shutdown.
 	ShutdownTimeout time.Duration
 
-	Validators   []Validator
+	// Validators is the ordered list of input validators applied to endpoint
+	// request parameters.
+	Validators []Validator
+	// ErrorHandler is the fallback error handler used by endpoints that do not
+	// define their own. If nil, a default handler is used.
 	ErrorHandler ErrorHandler
 
 	endpoints []*refinedEndpoint
@@ -53,8 +69,11 @@ func (s *Server) start() {
 			s.Port = 80
 		}
 		server := &http.Server{
-			Addr:    fmt.Sprintf(":%d", s.Port),
-			Handler: h2c.NewHandler(mx, &http2.Server{}),
+			Addr:         fmt.Sprintf(":%d", s.Port),
+			Handler:      h2c.NewHandler(mx, &http2.Server{}),
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  60 * time.Second,
 		}
 
 		go func() {
@@ -77,7 +96,8 @@ func (s *Server) start() {
 			s.Port = 443
 		}
 		server := http3.Server{
-			Addr: fmt.Sprintf(":%d", s.Port),
+			Addr:    fmt.Sprintf(":%d", s.Port),
+			Handler: mx,
 		}
 
 		go func() {

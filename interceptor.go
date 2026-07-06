@@ -18,6 +18,9 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// Interceptor is a middleware function that wraps an endpoint handler.
+// Interceptors are chained so that each one can perform pre-processing,
+// post-processing, or short-circuit the request before it reaches the handler.
 type Interceptor func(next func(*Context) error) func(ctx *Context) error
 
 type circuitBreakerSettings struct {
@@ -75,10 +78,19 @@ func newCircuitBreakerInterceptor(breakerName string) Interceptor {
 			if err != nil {
 				return ErrCircuitBroken
 			}
+			var panicked bool
 			defer func() {
+				if r := recover(); r != nil {
+					panicked = true
+					done(false)
+					panic(r)
+				}
+				if panicked {
+					return
+				}
 				isSuccessful := true
 				if er := ctx.Value(ctxKeyEndpointError); er != nil {
-					err = er.(error)
+					err := er.(error)
 					var e *errs.Err
 					if errors.As(err, &e) {
 						if e.Status >= http.StatusInternalServerError {
@@ -94,14 +106,20 @@ func newCircuitBreakerInterceptor(breakerName string) Interceptor {
 }
 
 var (
-	// This map contains the names and function definitions of client identifier, used in client rate limiting.
-	// Callers can register client identifiers to this map through RegisterClientIdentifier.
+	// clientIdentifiers is a map of client identifier names to their corresponding
+	// ClientIdentifier functions, used in client rate limiting.
+	// Callers can register client identifiers through RegisterClientIdentifier.
 	clientIdentifiers   = make(map[string]ClientIdentifier)
 	clientIdentifiersMu sync.RWMutex
 )
 
+// ClientIdentifier is a function that extracts a client identity string from
+// an HTTP request. It is used by the rate limiter to apply per-client limits.
+// The default implementation returns the client IP address.
 type ClientIdentifier func(*http.Request) string
 
+// RegisterClientIdentifier registers a named client identifier function that
+// can be referenced by the rate limiter configuration.
 func RegisterClientIdentifier(name string, identifier ClientIdentifier) {
 	clientIdentifiersMu.Lock()
 	clientIdentifiers[name] = identifier
@@ -125,8 +143,10 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 		if rls.ClientTokenRate < 0 {
 			rls.ClientTokenRate = rate.Inf
 		}
-		if rls.ClientTokenRate < 1 {
+		if rls.ClientTokenRate > 0 && rls.ClientTokenRate < 1 {
 			defaultExpiration = time.Second * time.Duration(1/rls.ClientTokenRate)
+		} else if rls.ClientTokenRate == 0 {
+			defaultExpiration = time.Minute
 		}
 		clientLimiters = cache.New(defaultExpiration, time.Second)
 	}
@@ -147,12 +167,13 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 			if clientLimiters != nil {
 				clientIdentity := clientIdentifier(ctx.Request)
 				var clientLimiter *rate.Limiter
-				if cached, exists := clientLimiters.Get(clientIdentity); !exists {
-					clientLimiter = rate.NewLimiter(rls.ClientTokenRate, rls.ClientTokenBucketSize)
-				} else {
+				if cached, exists := clientLimiters.Get(clientIdentity); exists {
 					clientLimiter = cached.(*rate.Limiter)
 				}
-				clientLimiters.Set(clientIdentity, clientLimiter, defaultExpiration)
+				if clientLimiter == nil {
+					clientLimiter = rate.NewLimiter(rls.ClientTokenRate, rls.ClientTokenBucketSize)
+					clientLimiters.Set(clientIdentity, clientLimiter, defaultExpiration)
+				}
 				if !clientLimiter.Allow() {
 					return ErrRateLimited
 				}
@@ -204,7 +225,7 @@ func newCorsInterceptor() Interceptor {
 			origin := ctx.Request.Header.Get("Origin")
 			if origin != "" && len(corsSettings.AllowOrigins) > 0 {
 				for i, allowOrigin := range corsSettings.AllowOrigins {
-					if origin == allowOrigin || strings.HasSuffix(origin, allowOrigin) {
+					if origin == allowOrigin || strings.HasSuffix(origin, "." + allowOrigin) {
 						ctx.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 					} else {
 						originUrl, err := url.Parse(origin)

@@ -16,13 +16,24 @@ import (
 	"github.com/wxy365/basal/rflt"
 )
 
+// App is a generic application container that bootstraps and manages the lifecycle
+// of HTTP servers, endpoints, interceptors, and shared application context.
 type App[C any] struct {
-	Name         string
-	DecryptFns   map[string]func(cipher []byte) ([]byte, error)
-	EncryptFns   map[string]func(plain []byte) ([]byte, error)
+	// Name is the application name, used for identification and server naming.
+	Name string
+	// DecryptFns is a map of decryption algorithm names to their corresponding
+	// decryption functions, used for decrypting request field values.
+	DecryptFns map[string]func(cipher []byte) ([]byte, error)
+	// EncryptFns is a map of encryption algorithm names to their corresponding
+	// encryption functions.
+	EncryptFns map[string]func(plain []byte) ([]byte, error)
+	// Initializers is a list of initialization functions called during application startup.
 	Initializers []AppInitializer[C]
-	Servers      []*Server
-	Context      C
+	// Servers is the list of HTTP servers managed by this application.
+	Servers []*Server
+	// Context is the shared application context, typically a pointer to a struct
+	// that holds application-wide dependencies such as configs and service references.
+	Context C
 
 	once sync.Once
 }
@@ -141,8 +152,15 @@ func (a *App[C]) init() {
 	}
 }
 
+// AppInitializer is a function type for application initialization callbacks.
+// It is called during App.Run() after all configuration has been loaded.
+// If an initializer returns an error, the application panics.
 type AppInitializer[C any] func(app *App[C]) error
 
+// Mount registers an endpoint onto a server within the application.
+// The endpoint is wired up via an AppInitializer, ensuring it is registered before
+// the server starts. If no server name is provided, the endpoint is mounted on
+// the first server in the App.Servers slice.
 func Mount[C any, I any, O any](e *Endpoint[I, O], a *App[C], svrName ...string) {
 	a.Initializers = append(a.Initializers, func(app *App[C]) error {
 		if len(svrName) == 0 {

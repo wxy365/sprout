@@ -14,10 +14,16 @@ var (
 	deserializers map[string]Deserializer
 )
 
+// Serializer serializes a model into an io.Reader for use as an HTTP request body.
+// The bodyKeys parameter indicates which struct fields should be included in the body.
 type Serializer func(model any, bodyKeys []string) (io.Reader, error)
 
+// Deserializer deserializes an HTTP response body into the provided model.
+// It receives the response reader, content type parameters, and the target model.
 type Deserializer func(r io.Reader, params map[string]string, model any) error
 
+// SerializeJson serializes a model as JSON into a bytes reader for use as the
+// HTTP request body.
 func SerializeJson(model any, bodyKeys []string) (io.Reader, error) {
 	raw, err := json.Marshal(model)
 	if err != nil {
@@ -26,6 +32,8 @@ func SerializeJson(model any, bodyKeys []string) (io.Reader, error) {
 	return bytes.NewBuffer(raw), nil
 }
 
+// DeserializeJson deserializes JSON from the response reader into the provided
+// model. If the model is an *errs.Err, it parses the error fields instead.
 func DeserializeJson(r io.Reader, params map[string]string, model any) error {
 	raw, err := io.ReadAll(r)
 	if err != nil {

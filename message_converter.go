@@ -19,23 +19,35 @@ var (
 	deserializers map[string]Deserializer
 )
 
+// Serializer serializes a model into the HTTP response body.
+// Implementations write the serialized representation to the response writer.
 type Serializer func(model any, w http.ResponseWriter) error
 
+// Deserializer deserializes an HTTP request body into the provided model.
+// Implementations read the request body and populate the model fields.
 type Deserializer func(r *http.Request, model any) error
 
 const (
-	MimeJson           = "application/json"
-	MimeMultipartForm  = "multipart/form-data"
+	// MimeJson is the MIME type for JSON content.
+	MimeJson = "application/json"
+	// MimeMultipartForm is the MIME type for multipart form data.
+	MimeMultipartForm = "multipart/form-data"
+	// MimeUrlencodedForm is the MIME type for URL-encoded form data.
 	MimeUrlencodedForm = "x-www-form-encoded"
-	MimeText           = "text/plain"
-	MimeHtml           = "text/html"
-	MimePdf            = "application/pdf"
+	// MimeText is the MIME type for plain text content.
+	MimeText = "text/plain"
+	// MimeHtml is the MIME type for HTML content.
+	MimeHtml = "text/html"
+	// MimePdf is the MIME type for PDF content.
+	MimePdf = "application/pdf"
 )
 
+// SerializeJson serializes a model as JSON into the response writer.
 func SerializeJson(model any, w http.ResponseWriter) error {
 	return json.NewEncoder(w).Encode(model)
 }
 
+// DeserializeJson deserializes JSON from the request body into the provided model.
 func DeserializeJson(r *http.Request, model any) error {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -47,6 +59,9 @@ func DeserializeJson(r *http.Request, model any) error {
 	return json.Unmarshal(raw, model)
 }
 
+// SerializeMultipartForm serializes a model as multipart form data into the
+// response writer. Struct fields tagged with "file" are written as file parts;
+// all other fields are written as form fields.
 func SerializeMultipartForm(model any, w http.ResponseWriter) error {
 	writer := multipart.NewWriter(w)
 	if e, ok := model.(*errs.Err); ok {
@@ -112,9 +127,13 @@ func SerializeMultipartForm(model any, w http.ResponseWriter) error {
 			}
 		}
 	}
-	return nil
+	return writer.Close()
 }
 
+
+// DeserializeMultipartForm deserializes multipart form data from the request
+// body into the provided model. Form fields are mapped to struct fields by name;
+// file uploads are mapped to []byte or io.Reader fields.
 func DeserializeMultipartForm(r *http.Request, model any) error {
 	if p, ok := r.Context().Value(ctxKeyContentTypeParams).(map[string]string); ok {
 		reader := multipart.NewReader(r.Body, p["boundary"])
@@ -168,6 +187,9 @@ func DeserializeMultipartForm(r *http.Request, model any) error {
 	return nil
 }
 
+// RegisterSerializer registers a serializer function for the given content type.
+// Supported content types are: application/json, text/html, text/plain,
+// multipart/form-data, x-www-form-encoded, and application/pdf.
 func RegisterSerializer(contentType string, serializer Serializer) {
 	switch contentType {
 	case MimeJson, MimeHtml, MimeText, MimeMultipartForm, MimeUrlencodedForm, MimePdf:
@@ -177,6 +199,9 @@ func RegisterSerializer(contentType string, serializer Serializer) {
 	}
 }
 
+// RegisterDeserializer registers a deserializer function for the given content type.
+// Supported content types are: application/json, text/html, text/plain,
+// multipart/form-data, x-www-form-encoded, and application/pdf.
 func RegisterDeserializer(contentType string, deserializer Deserializer) {
 	switch contentType {
 	case MimeJson, MimeHtml, MimeText, MimeMultipartForm, MimeUrlencodedForm, MimePdf:

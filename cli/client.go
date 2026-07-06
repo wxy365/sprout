@@ -20,10 +20,14 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// Client is an HTTP client wrapper that extends http.Client with convenience
+// methods for type-safe API calls using the sprout framework conventions.
 type Client struct {
 	http.Client
 }
 
+// NewClient creates a new Client with the specified timeout using standard
+// HTTP/1.1 transport.
 func NewClient(timeout time.Duration) *Client {
 	return &Client{
 		http.Client{
@@ -32,10 +36,14 @@ func NewClient(timeout time.Duration) *Client {
 	}
 }
 
+// NewH3Client creates a new Client that uses HTTP/3 (QUIC) transport with
+// default TLS settings.
 func NewH3Client(timeout time.Duration) *Client {
 	return NewH3ClientWithTLS(timeout, false)
 }
 
+// NewH3ClientWithTLS creates a new Client that uses HTTP/3 (QUIC) transport
+// with configurable TLS verification.
 func NewH3ClientWithTLS(timeout time.Duration, insecureSkipVerify bool) *Client {
 	roundTripper := &http3.Transport{
 		TLSClientConfig: &tls.Config{
@@ -54,6 +62,8 @@ func NewH3ClientWithTLS(timeout time.Duration, insecureSkipVerify bool) *Client 
 	return &Client{Client: client}
 }
 
+// NewH2cClient creates a new Client that uses HTTP/2 cleartext (h2c) transport
+// without TLS.
 func NewH2cClient(timeout time.Duration) *Client {
 	client := http.Client{
 		Transport: &http2.Transport{
@@ -67,6 +77,9 @@ func NewH2cClient(timeout time.Duration) *Client {
 	return &Client{Client: client}
 }
 
+// Doer returns a type-safe closure for making API calls. The returned function
+// handles serialization of the input struct, request dispatch, deserialization
+// of the response, and error mapping.
 func Doer[T, R any](client *Client, method, url, contentType string) func(ctx context.Context, in *T) (*R, error) {
 	var t T
 	var r R
@@ -83,6 +96,9 @@ func Doer[T, R any](client *Client, method, url, contentType string) func(ctx co
 	}
 }
 
+// Do performs an HTTP request with the given method, URL, and content type.
+// It serializes the input struct into the request body, dispatches the request,
+// and deserializes the response into the output struct.
 func (c *Client) Do(ctx context.Context, method, url, contentType string, in, out any) error {
 	url, body, err := makeUrlAndBody(url, contentType, in)
 	if err != nil {
@@ -97,6 +113,7 @@ func (c *Client) Do(ctx context.Context, method, url, contentType string, in, ou
 	if err != nil {
 		return err
 	}
+	defer resp.Body.Close()
 
 	if out != nil {
 		err = resolveHttpResponse(resp, out)
@@ -126,7 +143,7 @@ func makeUrlAndBody(url, contentType string, in any) (string, io.Reader, error) 
 			if err != nil {
 				return "", nil, err
 			}
-			url = strings.Replace(url, "{"+pname+"}", valStr, 1)
+			url = strings.Replace(url, "{"+pname+"}", urlpkg.QueryEscape(valStr), 1)
 		} else if pname, ok := f.Tag.Lookup("query"); ok {
 			valStr, err := rflt.ValueToString(fv)
 			if err != nil {

@@ -12,8 +12,14 @@ import (
 	"github.com/wxy365/basal/log"
 )
 
+// Handler is the function signature for business logic handlers.
+// It receives a request context and a deserialized input struct, and returns
+// an output struct or an error.
 type Handler[I any, O any] func(ctx *Context, in I) (O, error)
 
+// ErrorHandler is the function signature for handling errors that occur during
+// request processing. It is invoked by the endpoint or server when a handler
+// returns an error.
 type ErrorHandler func(ctx *Context, err error)
 
 var defaultErrHandler = func(ctx *Context, err error) {
@@ -24,19 +30,34 @@ var defaultErrHandler = func(ctx *Context, err error) {
 			statusCode = leiErr.Status
 		}
 	}
-	ctx.Writer.WriteHeader(statusCode)
 	ctx.Writer.Header().Set("Content-Type", MimeJson)
-	ctx.Writer.Write([]byte(leiErr.Error()))
+	ctx.Writer.WriteHeader(statusCode)
+	if leiErr != nil {
+		ctx.Writer.Write([]byte(leiErr.Error()))
+	} else {
+		ctx.Writer.Write([]byte(err.Error()))
+	}
 }
 
+// Endpoint defines a typed API endpoint with its pattern, HTTP methods,
+// business logic handler, interceptors, and error handler.
 type Endpoint[I any, O any] struct {
-	Name         string
-	Pattern      string
-	Methods      []string
-	Handler      Handler[I, O]
+	// Name is the endpoint name, used for logging and circuit breaker identification.
+	Name string
+	// Pattern is the URI path pattern, supporting static segments, named parameters
+	// (e.g. {id}), regex parameters (e.g. {name:~re}), format specifiers (%s, %d),
+	// and wildcards (*).
+	Pattern string
+	// Methods is the list of HTTP methods this endpoint responds to (e.g. GET, POST).
+	Methods []string
+	// Handler is the business logic function invoked when the endpoint matches a request.
+	Handler Handler[I, O]
+	// Interceptors is the list of interceptors applied to this endpoint. Built-in
+	// interceptors (panic recovery, circuit breaker, rate limiter, CORS) are added
+	// automatically during registration.
 	Interceptors []Interceptor
-	// error handler for this endpoint, if not set (normally, you don’t need to set it),
-	// the error handler registered on the server will be used
+	// ErrorHandler is the error handler for this endpoint. If nil, the server-level
+	// error handler is used as a fallback.
 	ErrorHandler
 }
 

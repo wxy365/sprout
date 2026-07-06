@@ -55,7 +55,7 @@ func parseHttpRequest[T any](in *T, r *http.Request, decrypters map[string]func(
 					if key, ok := tag.Lookup("cookie"); ok {
 						cookie, err := r.Cookie(key)
 						if err == nil {
-							val := cookie.String()
+							val := cookie.Value
 							valStr = &val
 						}
 					}

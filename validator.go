@@ -26,16 +26,28 @@ func defaultValidators() []Validator {
 	}
 }
 
+// Validator inspects a struct field's validation tag and, if the tag matches,
+// returns a ValidateFunc that performs the actual validation at request time.
 type Validator interface {
+	// ValidateFunc examines the validateTag for the struct field at fieldIdx
+	// within struType and returns a ValidateFunc if the tag is recognized.
 	ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc
 }
 
+// ValidateFunc validates a single struct field value. It returns an error
+// if the field value does not satisfy the validation rule.
 type ValidateFunc func(ctx context.Context, fieldIdx int, struValue reflect.Value) error
 
+// ObjectValidateFunc validates an entire struct value. It is typically built
+// by composing per-field ValidateFunc instances into a single function.
 type ObjectValidateFunc func(ctx context.Context, obj reflect.Value) error
 
+// RequiredValidator validates that a field is not the zero value when its
+// validation tag contains "required".
 type RequiredValidator struct{}
 
+// ValidateFunc checks for a "required" fragment in the validate tag and returns
+// a function that rejects zero-valued fields.
 func (r *RequiredValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
 	frags := strings.Split(validateTag, ";")
 	for _, frag := range frags {
@@ -52,8 +64,12 @@ func (r *RequiredValidator) ValidateFunc(validateTag string, fieldIdx int, struT
 	return nil
 }
 
+// RequiredByValidator validates that a field is required when at least one
+// of the named sibling fields is non-zero. The tag format is "required_by=FieldA,FieldB".
 type RequiredByValidator struct{}
 
+// ValidateFunc checks for a "required_by=" fragment in the validate tag and returns
+// a function that enforces conditional required validation.
 func (r *RequiredByValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
 	frags := strings.Split(validateTag, ";")
 	for _, frag := range frags {
@@ -90,8 +106,12 @@ func (r *RequiredByValidator) ValidateFunc(validateTag string, fieldIdx int, str
 	return nil
 }
 
+// EitherValidator validates that, among a set of fields, at least one is
+// non-zero. The tag format is "either=FieldA,FieldB".
 type EitherValidator struct{}
 
+// ValidateFunc checks for an "either=" fragment in the validate tag and returns
+// a function that ensures at least one of the named fields has a non-zero value.
 func (e *EitherValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
 	frags := strings.Split(validateTag, ";")
 	for _, frag := range frags {
@@ -128,8 +148,13 @@ func (e *EitherValidator) ValidateFunc(validateTag string, fieldIdx int, struTyp
 	return nil
 }
 
+// NumberRangeValidator validates that a numeric field falls within a specified
+// range. The tag format uses interval notation: "[min,max]", "(min,max]",
+// "[min,max)", or "(min,max)".
 type NumberRangeValidator struct{}
 
+// ValidateFunc checks for an interval notation fragment in the validate tag and
+// returns a function that validates the numeric field is within the specified bounds.
 func (n *NumberRangeValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
 	var bottom, upper string
 	var ge, le bool
@@ -260,8 +285,13 @@ func (n *NumberRangeValidator) ValidateFunc(validateTag string, fieldIdx int, st
 	}
 }
 
+// StringLengthValidator validates that a string field's length falls within
+// a specified range. The tag format uses interval notation: "[min,max]",
+// "(min,max]", "[min,max)", or "(min,max)".
 type StringLengthValidator struct{}
 
+// ValidateFunc checks for an interval notation fragment in the validate tag and
+// returns a function that validates the string length is within the specified bounds.
 func (s *StringLengthValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
 	var bottom, upper string
 	var ge, le bool
@@ -321,8 +351,12 @@ func (s *StringLengthValidator) ValidateFunc(validateTag string, fieldIdx int, s
 	}
 }
 
+// EmailValidator validates that a string field is a valid email address when
+// the validation tag contains "email".
 type EmailValidator struct{}
 
+// ValidateFunc checks for an "email" fragment in the validate tag and returns
+// a function that validates the field value matches the email regex pattern.
 func (e *EmailValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
 	for _, frag := range strings.Split(validateTag, ";") {
 		frag = strings.TrimSpace(frag)

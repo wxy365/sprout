@@ -2,7 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -10,8 +13,15 @@ import (
 )
 
 func TestDoer(t *testing.T) {
-	cli := NewH3Client(time.Second)
-	doer := Doer[DemoIn, DemoOut](cli, http.MethodPost, "https://localhost:443/demo/{id}/{name}", sp.MimeJson)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", sp.MimeJson)
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "ok"})
+	}))
+	defer srv.Close()
+
+	cli := NewClient(time.Second)
+	url := fmt.Sprintf("%s/demo/{id}/{name}", srv.URL)
+	doer := Doer[DemoIn, DemoOut](cli, http.MethodPost, url, sp.MimeJson)
 	in := &DemoIn{
 		Name:    "wxy",
 		Id:      1209,
