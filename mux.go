@@ -162,22 +162,40 @@ func newSection(parent section, i int, parts []string, method string, h func(ctx
 	return s
 }
 
-func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	acceptType, _, err := mime.ParseMediaType(r.Header.Get("Accept"))
+// parseMediaType returns the media type of the given header value, along with
+// its parameters.
+//
+// The media types that carry no parameter are recognised without the full
+// parsing, because mime.ParseMediaType is expensive and the headers are read
+// on every request. The wildcard media type is reported as the JSON media
+// type, which is the format the framework falls back to.
+func parseMediaType(header string) (string, map[string]string) {
+	if i := strings.IndexByte(header, ';'); i < 0 {
+		mediaType := strings.ToLower(strings.TrimSpace(header))
+		if mediaType == "" || mediaType == "*/*" {
+			return MimeJson, nil
+		}
+		return mediaType, nil
+	}
+	mediaType, params, err := mime.ParseMediaType(header)
 	if err != nil {
-		acceptType = MimeJson
+		return MimeJson, nil
 	}
-	if acceptType == "*/*" {
-		acceptType = MimeJson
+	if mediaType == "*/*" {
+		return MimeJson, params
 	}
+	return mediaType, params
+}
+
+func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	acceptType, _ := parseMediaType(r.Header.Get("Accept"))
 	serializer := serializers[acceptType]
 	if serializer == nil {
 		serializer = serializers[MimeJson]
 	}
 	serialize := func(er error) {
-		err = serializer(er, w)
-		// this should never happen
-		if err != nil {
+		if err := serializer(er, w); err != nil {
+			// this should never happen
 			log.ErrorErrF("Error in serializing error message", err)
 		}
 	}
@@ -186,10 +204,7 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	r = r.WithContext(context.WithValue(r.Context(), ctxKeyAcceptType, acceptType))
 
-	contentType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil {
-		contentType = MimeJson
-	}
+	contentType, params := parseMediaType(r.Header.Get("Content-Type"))
 	deserializer := deserializers[contentType]
 	r = r.WithContext(context.WithValue(r.Context(), ctxKeyDeserializer, deserializer))
 	if len(params) > 0 {

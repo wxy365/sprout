@@ -2,6 +2,7 @@ package sprout
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -143,12 +144,16 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 		if rls.ClientTokenRate < 0 {
 			rls.ClientTokenRate = rate.Inf
 		}
-		if rls.ClientTokenRate > 0 && rls.ClientTokenRate < 1 {
-			defaultExpiration = time.Second * time.Duration(1/rls.ClientTokenRate)
-		} else if rls.ClientTokenRate == 0 {
-			defaultExpiration = time.Minute
+		// A token bucket of zero size never grants a token, so a bucket size
+		// that is not specified falls back to the token rate.
+		rls.TokenBucketSize = fallbackTokenBucketSize(rls.TokenRate, rls.TokenBucketSize)
+		rls.ClientTokenBucketSize = fallbackTokenBucketSize(rls.ClientTokenRate, rls.ClientTokenBucketSize)
+		if rls.ClientTokenRate > 0 {
+			if rls.ClientTokenRate < 1 {
+				defaultExpiration = time.Second * time.Duration(1/rls.ClientTokenRate)
+			}
+			clientLimiters = cache.New(defaultExpiration, time.Second)
 		}
-		clientLimiters = cache.New(defaultExpiration, time.Second)
 	}
 	serverLimiter := rate.NewLimiter(rls.TokenRate, rls.TokenBucketSize)
 
@@ -181,6 +186,24 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 			return next(ctx)
 		}
 	}
+}
+
+// fallbackTokenBucketSize returns the token bucket size to use for the given
+// token rate. A token bucket of zero size never grants a token, so it would
+// reject every request. A bucket size that is not specified therefore falls
+// back to the token rate, rounded up to at least one token.
+func fallbackTokenBucketSize(limit rate.Limit, bucketSize int) int {
+	if bucketSize > 0 {
+		return bucketSize
+	}
+	if limit <= 0 || limit == rate.Inf {
+		return bucketSize
+	}
+	size := int(math.Ceil(float64(limit)))
+	if size < 1 {
+		size = 1
+	}
+	return size
 }
 
 // Rate limiting is applied both per endpoint and per client.

@@ -55,7 +55,7 @@ func (r *RequiredValidator) ValidateFunc(validateTag string, fieldIdx int, struT
 			return func(ctx context.Context, fieldIdx int, struValue reflect.Value) error {
 				fieldValue := struValue.Field(fieldIdx)
 				if fieldValue.IsZero() {
-					return errs.I18nNew(ctx, "sprout.params.required", struType.Field(fieldIdx).Name, http.StatusBadRequest)
+					return errs.I18nNew(ctx, "sprout.params.required", struType.Field(fieldIdx).Name).WithStatus(http.StatusBadRequest)
 				}
 				return nil
 			}
