@@ -2,27 +2,33 @@ package sprout
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"reflect"
 
 	"github.com/wxy365/basal/ds/slices"
 	"github.com/wxy365/basal/errs"
+	bjson "github.com/wxy365/basal/json"
 	"github.com/wxy365/basal/log"
 )
 
-// Handler is the function signature for business logic handlers.
+// handlerFunc is the function signature for business logic handlers.
 // It receives a request context and a deserialized input struct, and returns
 // an output struct or an error.
-type Handler[I any, O any] func(ctx *Context, in I) (O, error)
+//
+// The exported alias Handler is declared in api.go, which collects the public
+// API surface of the package.
+type handlerFunc[I any, O any] func(ctx *requestContext, in I) (O, error)
 
-// ErrorHandler is the function signature for handling errors that occur during
+// errorHandlerFunc is the function signature for handling errors that occur during
 // request processing. It is invoked by the endpoint or server when a handler
 // returns an error.
-type ErrorHandler func(ctx *Context, err error)
+//
+// The exported alias ErrorHandler is declared in api.go, which collects the
+// public API surface of the package.
+type errorHandlerFunc func(ctx *requestContext, err error)
 
-var defaultErrHandler = func(ctx *Context, err error) {
+var defaultErrHandler = func(ctx *requestContext, err error) {
 	var leiErr *errs.Err
 	statusCode := http.StatusInternalServerError
 	if errors.As(err, &leiErr) {
@@ -39,9 +45,12 @@ var defaultErrHandler = func(ctx *Context, err error) {
 	}
 }
 
-// Endpoint defines a typed API endpoint with its pattern, HTTP methods,
+// endpoint defines a typed API endpoint with its pattern, HTTP methods,
 // business logic handler, interceptors, and error handler.
-type Endpoint[I any, O any] struct {
+//
+// The exported alias Endpoint is declared in api.go, which collects the public
+// API surface of the package.
+type endpoint[I any, O any] struct {
 	// Name is the endpoint name, used for logging and circuit breaker identification.
 	Name string
 	// Pattern is the URI path pattern, supporting static segments, named parameters
@@ -51,17 +60,17 @@ type Endpoint[I any, O any] struct {
 	// Methods is the list of HTTP methods this endpoint responds to (e.g. GET, POST).
 	Methods []string
 	// Handler is the business logic function invoked when the endpoint matches a request.
-	Handler Handler[I, O]
+	Handler handlerFunc[I, O]
 	// Interceptors is the list of interceptors applied to this endpoint. Built-in
 	// interceptors (panic recovery, circuit breaker, rate limiter, CORS) are added
 	// automatically during registration.
-	Interceptors []Interceptor
+	Interceptors []interceptorFunc
 	// ErrorHandler is the error handler for this endpoint. If nil, the server-level
 	// error handler is used as a fallback.
 	ErrorHandler
 }
 
-func (e *Endpoint[I, O]) appendToServer(svr *Server, decrypters map[string]func(cipher []byte) ([]byte, error)) {
+func (e *endpoint[I, O]) appendToServer(svr *httpServer, decrypters map[string]func(cipher []byte) ([]byte, error)) {
 	// validate endpoint methods
 	for _, mth := range e.Methods {
 		if slices.Lookup(allowedMethods, mth, func(left, right string) bool {
@@ -89,7 +98,7 @@ func (e *Endpoint[I, O]) appendToServer(svr *Server, decrypters map[string]func(
 
 	validateFunc := svr.buildInputEntityValidateFuncs(inputType)
 
-	httpHandler := func(ctx *Context) error {
+	httpHandler := func(ctx *requestContext) error {
 		var in I
 		err := parseHttpRequest(&in, ctx.Request, decrypters)
 		if err != nil {
@@ -101,8 +110,8 @@ func (e *Endpoint[I, O]) appendToServer(svr *Server, decrypters map[string]func(
 		}
 
 		if svr.Debug {
-			inputStr, _ := json.Marshal(in)
-			log.Debug(`Endpoint [{0}] input: {1}`, r.name, inputStr)
+			inputStr, _ := bjson.Marshal(in)
+			log.Debug(`Endpoint [{0}] input: {1}`, r.name, string(inputStr))
 		}
 
 		out, err := e.Handler(ctx, in)
@@ -132,7 +141,7 @@ func (e *Endpoint[I, O]) appendToServer(svr *Server, decrypters map[string]func(
 		return nil
 	}
 
-	ics := []Interceptor{recoverInterceptor}
+	ics := []interceptorFunc{recoverInterceptor}
 	circuitBreaker := newCircuitBreakerInterceptor(r.name)
 	ics = append(ics, circuitBreaker)
 	rateLimiter := newRateLimiterInterceptor(r.name)
@@ -141,10 +150,10 @@ func (e *Endpoint[I, O]) appendToServer(svr *Server, decrypters map[string]func(
 	if corsInterceptor != nil {
 		ics = append(ics, corsInterceptor)
 	}
-	for i := len(ics); i > 0; i-- {
-		ic := ics[i-1]
-		httpHandler = ic(httpHandler)
-	}
+	// The interceptors of the endpoint are applied after the built-in ones, so
+	// that the built-in panic recovery stays the outermost interceptor.
+	ics = append(ics, e.Interceptors...)
+	httpHandler = appendServerInterceptors(httpHandler, ics...)
 	errHandler := e.ErrorHandler
 	if errHandler == nil {
 		errHandler = svr.ErrorHandler
@@ -152,7 +161,7 @@ func (e *Endpoint[I, O]) appendToServer(svr *Server, decrypters map[string]func(
 	if errHandler == nil {
 		errHandler = defaultErrHandler
 	}
-	r.httpHandler = func(ctx *Context) error {
+	r.httpHandler = func(ctx *requestContext) error {
 		err := httpHandler(ctx)
 		if err != nil {
 			errHandler(ctx, err)
@@ -167,5 +176,5 @@ type refinedEndpoint struct {
 	name        string
 	pattern     string
 	methods     []string
-	httpHandler func(ctx *Context) error
+	httpHandler func(ctx *requestContext) error
 }

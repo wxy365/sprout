@@ -1,7 +1,6 @@
 package sprout
 
 import (
-	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -9,46 +8,47 @@ import (
 	"strconv"
 
 	"github.com/wxy365/basal/errs"
+	bjson "github.com/wxy365/basal/json"
 	"github.com/wxy365/basal/log"
 	"github.com/wxy365/basal/rflt"
 	"github.com/wxy365/basal/text"
 )
 
 var (
-	serializers   map[string]Serializer
-	deserializers map[string]Deserializer
+	serializers   map[string]serializerFunc
+	deserializers map[string]deserializerFunc
 )
 
-// Serializer serializes a model into the HTTP response body.
+// serializerFunc serializes a model into the HTTP response body.
 // Implementations write the serialized representation to the response writer.
-type Serializer func(model any, w http.ResponseWriter) error
+type serializerFunc func(model any, w http.ResponseWriter) error
 
-// Deserializer deserializes an HTTP request body into the provided model.
+// deserializerFunc deserializes an HTTP request body into the provided model.
 // Implementations read the request body and populate the model fields.
-type Deserializer func(r *http.Request, model any) error
+type deserializerFunc func(r *http.Request, model any) error
 
 const (
-	// MimeJson is the MIME type for JSON content.
-	MimeJson = "application/json"
-	// MimeMultipartForm is the MIME type for multipart form data.
-	MimeMultipartForm = "multipart/form-data"
-	// MimeUrlencodedForm is the MIME type for URL-encoded form data.
-	MimeUrlencodedForm = "x-www-form-encoded"
-	// MimeText is the MIME type for plain text content.
-	MimeText = "text/plain"
-	// MimeHtml is the MIME type for HTML content.
-	MimeHtml = "text/html"
-	// MimePdf is the MIME type for PDF content.
-	MimePdf = "application/pdf"
+	// mimeJson is the MIME type for JSON content.
+	mimeJson = "application/json"
+	// mimeMultipartForm is the MIME type for multipart form data.
+	mimeMultipartForm = "multipart/form-data"
+	// mimeUrlencodedForm is the MIME type for URL-encoded form data.
+	mimeUrlencodedForm = "x-www-form-encoded"
+	// mimeText is the MIME type for plain text content.
+	mimeText = "text/plain"
+	// mimeHtml is the MIME type for HTML content.
+	mimeHtml = "text/html"
+	// mimePdf is the MIME type for PDF content.
+	mimePdf = "application/pdf"
 )
 
-// SerializeJson serializes a model as JSON into the response writer.
-func SerializeJson(model any, w http.ResponseWriter) error {
-	return json.NewEncoder(w).Encode(model)
+// serializeJson serializes a model as JSON into the response writer.
+func serializeJson(model any, w http.ResponseWriter) error {
+	return bjson.MarshalWrite(w, model)
 }
 
-// DeserializeJson deserializes JSON from the request body into the provided model.
-func DeserializeJson(r *http.Request, model any) error {
+// deserializeJson deserializes JSON from the request body into the provided model.
+func deserializeJson(r *http.Request, model any) error {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		return err
@@ -56,13 +56,13 @@ func DeserializeJson(r *http.Request, model any) error {
 	if len(raw) == 0 {
 		return nil
 	}
-	return json.Unmarshal(raw, model)
+	return bjson.Unmarshal(raw, model)
 }
 
-// SerializeMultipartForm serializes a model as multipart form data into the
+// serializeMultipartForm serializes a model as multipart form data into the
 // response writer. Struct fields tagged with "file" are written as file parts;
 // all other fields are written as form fields.
-func SerializeMultipartForm(model any, w http.ResponseWriter) error {
+func serializeMultipartForm(model any, w http.ResponseWriter) error {
 	writer := multipart.NewWriter(w)
 	if e, ok := model.(*errs.Err); ok {
 		if e.Code != "" {
@@ -131,10 +131,10 @@ func SerializeMultipartForm(model any, w http.ResponseWriter) error {
 }
 
 
-// DeserializeMultipartForm deserializes multipart form data from the request
+// deserializeMultipartForm deserializes multipart form data from the request
 // body into the provided model. Form fields are mapped to struct fields by name;
 // file uploads are mapped to []byte or io.Reader fields.
-func DeserializeMultipartForm(r *http.Request, model any) error {
+func deserializeMultipartForm(r *http.Request, model any) error {
 	if p, ok := r.Context().Value(ctxKeyContentTypeParams).(map[string]string); ok {
 		reader := multipart.NewReader(r.Body, p["boundary"])
 		f, err := reader.ReadForm(25)
@@ -187,24 +187,24 @@ func DeserializeMultipartForm(r *http.Request, model any) error {
 	return nil
 }
 
-// RegisterSerializer registers a serializer function for the given content type.
+// registerSerializer registers a serializer function for the given content type.
 // Supported content types are: application/json, text/html, text/plain,
 // multipart/form-data, x-www-form-encoded, and application/pdf.
-func RegisterSerializer(contentType string, serializer Serializer) {
+func registerSerializer(contentType string, serializer serializerFunc) {
 	switch contentType {
-	case MimeJson, MimeHtml, MimeText, MimeMultipartForm, MimeUrlencodedForm, MimePdf:
+	case mimeJson, mimeHtml, mimeText, mimeMultipartForm, mimeUrlencodedForm, mimePdf:
 		serializers[contentType] = serializer
 	default:
 		log.Panic("Content type {0} not supported", contentType)
 	}
 }
 
-// RegisterDeserializer registers a deserializer function for the given content type.
+// registerDeserializer registers a deserializer function for the given content type.
 // Supported content types are: application/json, text/html, text/plain,
 // multipart/form-data, x-www-form-encoded, and application/pdf.
-func RegisterDeserializer(contentType string, deserializer Deserializer) {
+func registerDeserializer(contentType string, deserializer deserializerFunc) {
 	switch contentType {
-	case MimeJson, MimeHtml, MimeText, MimeMultipartForm, MimeUrlencodedForm, MimePdf:
+	case mimeJson, mimeHtml, mimeText, mimeMultipartForm, mimeUrlencodedForm, mimePdf:
 		deserializers[contentType] = deserializer
 	default:
 		log.Panic("Content type {0} not supported", contentType)
@@ -213,13 +213,13 @@ func RegisterDeserializer(contentType string, deserializer Deserializer) {
 
 func init() {
 	if serializers == nil {
-		serializers = make(map[string]Serializer)
+		serializers = make(map[string]serializerFunc)
 	}
 	if deserializers == nil {
-		deserializers = make(map[string]Deserializer)
+		deserializers = make(map[string]deserializerFunc)
 	}
-	serializers[MimeJson] = SerializeJson
-	deserializers[MimeJson] = DeserializeJson
-	serializers[MimeMultipartForm] = SerializeMultipartForm
-	deserializers[MimeMultipartForm] = DeserializeMultipartForm
+	serializers[mimeJson] = serializeJson
+	deserializers[mimeJson] = deserializeJson
+	serializers[mimeMultipartForm] = serializeMultipartForm
+	deserializers[mimeMultipartForm] = deserializeMultipartForm
 }

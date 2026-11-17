@@ -16,9 +16,12 @@ import (
 	"github.com/wxy365/basal/rflt"
 )
 
-// App is a generic application container that bootstraps and manages the lifecycle
+// app is a generic application container that bootstraps and manages the lifecycle
 // of HTTP servers, endpoints, interceptors, and shared application context.
-type App[C any] struct {
+//
+// The exported alias App is declared in api.go, which collects the public API
+// surface of the package.
+type app[C any] struct {
 	// Name is the application name, used for identification and server naming.
 	Name string
 	// DecryptFns is a map of decryption algorithm names to their corresponding
@@ -28,9 +31,9 @@ type App[C any] struct {
 	// encryption functions.
 	EncryptFns map[string]func(plain []byte) ([]byte, error)
 	// Initializers is a list of initialization functions called during application startup.
-	Initializers []AppInitializer[C]
+	Initializers []appInitializer[C]
 	// Servers is the list of HTTP servers managed by this application.
-	Servers []*Server
+	Servers []*httpServer
 	// Context is the shared application context, typically a pointer to a struct
 	// that holds application-wide dependencies such as configs and service references.
 	Context C
@@ -38,7 +41,7 @@ type App[C any] struct {
 	once sync.Once
 }
 
-func (a *App[C]) Run() {
+func (a *app[C]) Run() {
 	a.once.Do(func() {
 		fmt.Print(`
    _____                        __
@@ -62,9 +65,12 @@ func (a *App[C]) Run() {
 	})
 }
 
-func (a *App[C]) init() {
+func (a *app[C]) init() {
+	totalStart := time.Now()
 	var err error
-	a.Name, err = def.GetStr("app.Name", a.Name)
+
+	nameStart := time.Now()
+	a.Name, err = def.GetStr("app.name", a.Name)
 	if err != nil && !cfg.IsCfgMissingErr(err) {
 		panic(err)
 	}
@@ -72,7 +78,9 @@ func (a *App[C]) init() {
 		processPath := os.Args[0]
 		a.Name = filepath.Base(processPath)
 	}
+	nameDuration := time.Since(nameStart)
 
+	contextStart := time.Now()
 	t := reflect.TypeOf(a.Context)
 	if t.Kind() != reflect.Pointer {
 		panic("The app Context should be pointer kind")
@@ -83,7 +91,9 @@ func (a *App[C]) init() {
 		a.Context = appCtx.(C)
 	}
 	initAppContextAttribute(a)
+	contextDuration := time.Since(contextStart)
 
+	serversStart := time.Now()
 	svrCfgs, err := def.GetObj[[]svrCfg]("app.servers")
 	if err != nil && !cfg.IsCfgMissingErr(err) {
 		panic(err)
@@ -143,25 +153,57 @@ func (a *App[C]) init() {
 			svr.ErrorHandler = defaultErrHandler
 		}
 	}
+	serversDuration := time.Since(serversStart)
 
+	initializersStart := time.Now()
 	for _, initializer := range a.Initializers {
 		err = initializer(a)
 		if err != nil {
 			panic(err)
 		}
 	}
+	initializersDuration := time.Since(initializersStart)
+
+	totalDuration := time.Since(totalStart)
+	configDuration := def.LoadDuration()
+
+	log.Debug("Startup stage timing: name={0}", formatDuration(nameDuration))
+	log.Debug("Startup stage timing: context={0}", formatDuration(contextDuration))
+	log.Debug("Startup stage timing: servers={0}", formatDuration(serversDuration))
+	log.Debug("Startup stage timing: initializers={0}", formatDuration(initializersDuration))
+	log.Debug("Startup stage timing: config={0}", formatDuration(configDuration))
+	log.Info("Startup timing: name={0} context={1} servers={2} initializers={3} total={4} config={5}",
+		formatDuration(nameDuration),
+		formatDuration(contextDuration),
+		formatDuration(serversDuration),
+		formatDuration(initializersDuration),
+		formatDuration(totalDuration),
+		formatDuration(configDuration),
+	)
 }
 
-// AppInitializer is a function type for application initialization callbacks.
+// formatDuration renders a duration with a tenth of a millisecond precision,
+// e.g. 1.2ms.
+func formatDuration(d time.Duration) string {
+	return d.Round(100 * time.Microsecond).String()
+}
+
+// appInitializer is a function type for application initialization callbacks.
 // It is called during App.Run() after all configuration has been loaded.
 // If an initializer returns an error, the application panics.
-type AppInitializer[C any] func(app *App[C]) error
+//
+// The exported alias AppInitializer is declared in api.go, which collects the
+// public API surface of the package.
+type appInitializer[C any] func(a *App[C]) error
 
-// Mount registers an endpoint onto a server within the application.
+// mount registers an endpoint onto a server within the application.
 // The endpoint is wired up via an AppInitializer, ensuring it is registered before
 // the server starts. If no server name is provided, the endpoint is mounted on
 // the first server in the App.Servers slice.
-func Mount[C any, I any, O any](e *Endpoint[I, O], a *App[C], svrName ...string) {
+//
+// The exported wrapper Mount is declared in api.go, which collects the public
+// API surface of the package.
+func mount[C any, I any, O any](e *Endpoint[I, O], a *App[C], svrName ...string) {
 	a.Initializers = append(a.Initializers, func(app *App[C]) error {
 		if len(svrName) == 0 {
 			if len(app.Servers) == 0 {
@@ -200,14 +242,19 @@ func populateObject(val reflect.Value, typ reflect.Type, keyPrefix string) {
 		f := typ.Field(i)
 		fv := val.Field(i)
 		ft := f.Type
-		cfgKey := f.Tag.Get("cfg")
+		// The "map" tag is the canonical name of the configuration tag. The
+		// "cfg" tag is kept as a deprecated alias of it.
+		cfgKey := f.Tag.Get("map")
+		if cfgKey == "" {
+			cfgKey = f.Tag.Get("cfg")
+		}
 
 		for fv.Kind() == reflect.Pointer {
 			fv = fv.Elem()
 			ft = ft.Elem()
 		}
 
-		if defStrValue, ok := f.Tag.Lookup("default"); ok {
+		if defStrValue, ok := f.Tag.Lookup("default"); ok && fv.IsValid() {
 			err := rflt.UnmarshalValue(fv, defStrValue)
 			if err != nil {
 				panic(err)

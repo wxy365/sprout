@@ -2,6 +2,7 @@ package sprout
 
 import (
 	"context"
+	"errors"
 	"mime"
 	"net/http"
 	"regexp"
@@ -28,7 +29,7 @@ type mux struct {
 	root *rootSection
 }
 
-func newMux(handlers map[epSig]func(*Context)) *mux {
+func newMux(handlers map[epSig]func(*requestContext)) *mux {
 	m := &mux{}
 	if len(handlers) == 0 {
 		log.Panic("No handler specified when creating new http route mux")
@@ -37,7 +38,7 @@ func newMux(handlers map[epSig]func(*Context)) *mux {
 		baseSection{
 			lvl:     0,
 			patn:    "/",
-			hdlrMap: make(map[string]func(*Context)),
+			hdlrMap: make(map[string]func(*requestContext)),
 		},
 	}
 	// scan for endpoints with pattern "/"
@@ -66,7 +67,7 @@ func newMux(handlers map[epSig]func(*Context)) *mux {
 	return m
 }
 
-func addSection(parent section, i int, parts []string, method string, h func(*Context)) {
+func addSection(parent section, i int, parts []string, method string, h func(*requestContext)) {
 	if i >= len(parts) {
 		return
 	}
@@ -95,7 +96,7 @@ func addSection(parent section, i int, parts []string, method string, h func(*Co
 	}
 }
 
-func newSection(parent section, i int, parts []string, method string, h func(ctx *Context)) section {
+func newSection(parent section, i int, parts []string, method string, h func(ctx *requestContext)) section {
 	var s section
 	isEndPart := i == len(parts)-1
 	pattern := parts[i]
@@ -194,6 +195,10 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serializer = serializers[MimeJson]
 	}
 	serialize := func(er error) {
+		var e *errs.Err
+		if errors.As(er, &e) && e.Status > 0 {
+			w.WriteHeader(e.Status)
+		}
 		if err := serializer(er, w); err != nil {
 			// this should never happen
 			log.ErrorErrF("Error in serializing error message", err)
@@ -211,57 +216,69 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(context.WithValue(r.Context(), ctxKeyContentTypeParams, params))
 	}
 
-	ctx := &Context{
-		Request: r,
-		Writer:  w,
-	}
-
 	if m.root == nil {
 		serialize(errs.New("No endpoint defined").WithStatus(http.StatusNotFound))
 		return
 	}
 	path := strings.ReplaceAll(r.URL.Path, "//", "/")
 	rootFm, _, _ := m.root.finalMatch(r.Method, "")
+
+	var handler func(*requestContext)
 	if path == "" || path == "/" {
-		if rootFm {
-			m.root.handler(r.Method)(ctx)
-		} else {
+		if !rootFm {
 			serialize(errs.New("Resource not found").WithStatus(http.StatusNotFound))
 			return
 		}
-		return
+		handler = m.root.handler(r.Method)
+	} else {
+		theOne := new(section)
+		pathParams := make(map[section][2]string)
+		if rootFm {
+			*theOne = m.root
+		}
+		if len(m.root.chdn) > 0 {
+			parts := strings.Split(path, "/")
+			if parts[0] == "" {
+				parts = parts[1:]
+			}
+			for _, s := range m.root.children() {
+				match(s, 0, parts, r.Method, pathParams, theOne)
+			}
+		}
+		if *theOne == nil {
+			serialize(errs.New("Resource not found").WithStatus(http.StatusNotFound))
+			return
+		}
+		if len(pathParams) > 0 {
+			pm := make(map[string]string)
+			for s := *theOne; s != nil; {
+				if param, exists := pathParams[s]; exists {
+					pm[param[0]] = param[1]
+				}
+				s = s.parent()
+			}
+			r = r.WithContext(context.WithValue(r.Context(), ctxKeyPathParams, pm))
+		}
+		handler = (*theOne).handler(r.Method)
 	}
 
-	theOne := new(section)
-	pathParams := make(map[section][2]string)
-	if rootFm {
-		*theOne = m.root
-	}
-	if len(m.root.chdn) > 0 {
-		parts := strings.Split(path, "/")
-		if parts[0] == "" {
-			parts = parts[1:]
-		}
-		for _, s := range m.root.children() {
-			match(s, 0, parts, r.Method, pathParams, theOne)
-		}
-	}
-	if *theOne == nil {
+	if handler == nil {
 		serialize(errs.New("Resource not found").WithStatus(http.StatusNotFound))
 		return
 	}
-	if len(pathParams) > 0 {
-		pm := make(map[string]string)
-		for s := *theOne; s != nil; {
-			if param, exists := pathParams[s]; exists {
-				pm[param[0]] = param[1]
-			}
-			s = s.parent()
-		}
-		r = r.WithContext(context.WithValue(r.Context(), ctxKeyPathParams, pm))
+
+	// The context is built at the dispatch point, so that the handler always
+	// sees a request carrying every context value: the serializer, the
+	// deserializer, the accept type, the content type parameters and the path
+	// parameters. http.Request.WithContext returns a shallow copy, so building
+	// the context earlier would leave it pointing at a request without the path
+	// parameters attached.
+	ctx := &requestContext{
+		Request: r,
+		Writer:  w,
 	}
 
-	(*theOne).handler(r.Method)(ctx)
+	handler(ctx)
 }
 
 func match(s section, idx int, uriParts []string, method string, pathParams map[section][2]string, theOne *section) {
@@ -293,10 +310,10 @@ type section interface {
 	weight() int
 	parent() section
 	children() []section
-	handler(method string) func(ctx *Context)
-	handlerMap() map[string]func(ctx *Context)
+	handler(method string) func(ctx *requestContext)
+	handlerMap() map[string]func(ctx *requestContext)
 	pattern() string
-	addHandler(method string, h func(ctx *Context))
+	addHandler(method string, h func(ctx *requestContext))
 	addChild(section)
 }
 
@@ -304,7 +321,7 @@ type baseSection struct {
 	lvl     int
 	prnt    section                       // parent section
 	chdn    []section                     // children sections. a tail section has no children
-	hdlrMap map[string]func(ctx *Context) // http endpoint handler, only tail section has handler
+	hdlrMap map[string]func(ctx *requestContext) // http endpoint handler, only tail section has handler
 	patn    string
 }
 
@@ -334,7 +351,7 @@ func (b *baseSection) children() []section {
 	return b.chdn
 }
 
-func (b *baseSection) handler(method string) func(ctx *Context) {
+func (b *baseSection) handler(method string) func(ctx *requestContext) {
 	return b.hdlrMap[method]
 }
 
@@ -346,13 +363,13 @@ func (b *baseSection) pattern() string {
 	return b.patn
 }
 
-func (b *baseSection) handlerMap() map[string]func(ctx *Context) {
+func (b *baseSection) handlerMap() map[string]func(ctx *requestContext) {
 	return b.hdlrMap
 }
 
-func (b *baseSection) addHandler(method string, h func(ctx *Context)) {
+func (b *baseSection) addHandler(method string, h func(ctx *requestContext)) {
 	if len(b.hdlrMap) == 0 {
-		b.hdlrMap = make(map[string]func(ctx *Context))
+		b.hdlrMap = make(map[string]func(ctx *requestContext))
 	}
 	method = strings.ToUpper(method)
 	if slices.Lookup(allowedMethods, method, func(left, right string) bool {

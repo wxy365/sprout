@@ -19,10 +19,22 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Interceptor is a middleware function that wraps an endpoint handler.
+// interceptorFunc is a middleware function that wraps an endpoint handler.
 // Interceptors are chained so that each one can perform pre-processing,
 // post-processing, or short-circuit the request before it reaches the handler.
-type Interceptor func(next func(*Context) error) func(ctx *Context) error
+//
+// The exported alias Interceptor is declared in api.go, which collects the
+// public API surface of the package.
+type interceptorFunc func(next func(*requestContext) error) func(ctx *requestContext) error
+
+// appendServerInterceptors wraps the given handler with the interceptors, the
+// first one being the outermost.
+func appendServerInterceptors(handler func(*requestContext) error, interceptors ...interceptorFunc) func(*requestContext) error {
+	for i := len(interceptors) - 1; i >= 0; i-- {
+		handler = interceptors[i](handler)
+	}
+	return handler
+}
 
 type circuitBreakerSettings struct {
 	MaxRequests            uint32        `map:"max_requests"`
@@ -61,7 +73,7 @@ func newCircuitBreaker(cbs *circuitBreakerSettings) *gobreaker.TwoStepCircuitBre
 
 // newCircuitBreakerInterceptor creates a circuit breaker with the given Name.
 // If the settings for the breaker is not configured, then the default settings is applied.
-func newCircuitBreakerInterceptor(breakerName string) Interceptor {
+func newCircuitBreakerInterceptor(breakerName string) interceptorFunc {
 	cbs := getCircuitBreakerSettings(breakerName)
 	if cbs == nil {
 		cbs = &circuitBreakerSettings{
@@ -73,11 +85,11 @@ func newCircuitBreakerInterceptor(breakerName string) Interceptor {
 		}
 	}
 	breaker := newCircuitBreaker(cbs)
-	return func(next func(ctx *Context) error) func(ctx *Context) error {
-		return func(ctx *Context) error {
+	return func(next func(ctx *requestContext) error) func(ctx *requestContext) error {
+		return func(ctx *requestContext) error {
 			done, err := breaker.Allow()
 			if err != nil {
-				return ErrCircuitBroken
+				return errCircuitBroken
 			}
 			var panicked bool
 			defer func() {
@@ -110,25 +122,36 @@ var (
 	// clientIdentifiers is a map of client identifier names to their corresponding
 	// ClientIdentifier functions, used in client rate limiting.
 	// Callers can register client identifiers through RegisterClientIdentifier.
-	clientIdentifiers   = make(map[string]ClientIdentifier)
+	clientIdentifiers   = make(map[string]clientIdentifierFunc)
 	clientIdentifiersMu sync.RWMutex
 )
 
-// ClientIdentifier is a function that extracts a client identity string from
+// clientIdentifierFunc is a function that extracts a client identity string from
 // an HTTP request. It is used by the rate limiter to apply per-client limits.
 // The default implementation returns the client IP address.
-type ClientIdentifier func(*http.Request) string
+//
+// The exported alias ClientIdentifier is declared in api.go, which collects the
+// public API surface of the package.
+type clientIdentifierFunc func(*http.Request) string
 
-// RegisterClientIdentifier registers a named client identifier function that
+// registerClientIdentifier registers a named client identifier function that
 // can be referenced by the rate limiter configuration.
-func RegisterClientIdentifier(name string, identifier ClientIdentifier) {
+//
+// The exported wrapper RegisterClientIdentifier is declared in api.go, which
+// collects the public API surface of the package.
+func registerClientIdentifier(name string, identifier clientIdentifierFunc) {
 	clientIdentifiersMu.Lock()
 	clientIdentifiers[name] = identifier
 	clientIdentifiersMu.Unlock()
 }
 
 // The rate limiter controls the traffic at both the client and the server interface simultaneously
-func newRateLimiterInterceptor(limiterName string) Interceptor {
+//
+// A limiter that is not configured is not applied to the client side at all. A
+// limiter that is configured applies the client side limit only when a client
+// token rate is set, because a limiter without a token rate rejects every
+// request.
+func newRateLimiterInterceptor(limiterName string) interceptorFunc {
 	rls := getRateLimiterSettings(limiterName)
 	var clientLimiters *cache.Cache
 	defaultExpiration := time.Second
@@ -164,10 +187,10 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 		clientIdentifier = tp.GetClientIp
 	}
 
-	return func(next func(ctx *Context) error) func(ctx *Context) error {
-		return func(ctx *Context) error {
+	return func(next func(ctx *requestContext) error) func(ctx *requestContext) error {
+		return func(ctx *requestContext) error {
 			if !serverLimiter.Allow() {
-				return ErrRateLimited
+				return errRateLimited
 			}
 			if clientLimiters != nil {
 				clientIdentity := clientIdentifier(ctx.Request)
@@ -180,7 +203,7 @@ func newRateLimiterInterceptor(limiterName string) Interceptor {
 					clientLimiters.Set(clientIdentity, clientLimiter, defaultExpiration)
 				}
 				if !clientLimiter.Allow() {
-					return ErrRateLimited
+					return errRateLimited
 				}
 			}
 			return next(ctx)
@@ -230,7 +253,7 @@ func getRateLimiterSettings(limiterName string) *rateLimiterSettings {
 	return nil
 }
 
-func newCorsInterceptor() Interceptor {
+func newCorsInterceptor() interceptorFunc {
 	corsSettings := getCorsSettings()
 	if corsSettings == nil {
 		return nil
@@ -243,8 +266,8 @@ func newCorsInterceptor() Interceptor {
 			parsedOrigins[i] = u
 		}
 	}
-	return func(next func(*Context) error) func(ctx *Context) error {
-		return func(ctx *Context) error {
+	return func(next func(*requestContext) error) func(ctx *requestContext) error {
+		return func(ctx *requestContext) error {
 			origin := ctx.Request.Header.Get("Origin")
 			if origin != "" && len(corsSettings.AllowOrigins) > 0 {
 				for i, allowOrigin := range corsSettings.AllowOrigins {
@@ -294,8 +317,8 @@ type corsSettings struct {
 	MaxAge           int      `map:"max_age"`
 }
 
-func recoverInterceptor(next func(ctx *Context) error) func(ctx *Context) error {
-	return func(ctx *Context) error {
+func recoverInterceptor(next func(ctx *requestContext) error) func(ctx *requestContext) error {
+	return func(ctx *requestContext) error {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("Panic recovered in endpoint: {0} {1}", ctx.Request.Method, ctx.Request.URL.Path)

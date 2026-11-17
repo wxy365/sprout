@@ -11,16 +11,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
 	"github.com/wxy365/basal/log"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
 
-// Server represents an HTTP server instance managed by the application.
+// httpServer represents an HTTP server instance managed by the application.
 // It holds network configuration, validator chains, error handlers, and the
 // collection of registered endpoints.
-type Server struct {
+//
+// The exported alias Server is declared in api.go, which collects the public
+// API surface of the package.
+type httpServer struct {
 	// Name is the server name, used for configuration matching and logging.
 	Name string
 	// Port is the TCP port the server listens on. Defaults to 80 for HTTP and
@@ -39,16 +41,16 @@ type Server struct {
 
 	// Validators is the ordered list of input validators applied to endpoint
 	// request parameters.
-	Validators []Validator
+	Validators []validator
 	// ErrorHandler is the fallback error handler used by endpoints that do not
 	// define their own. If nil, a default handler is used.
-	ErrorHandler ErrorHandler
+	ErrorHandler errorHandlerFunc
 
 	endpoints []*refinedEndpoint
 }
 
-func newDefaultServer(name string) *Server {
-	return &Server{
+func newDefaultServer(name string) *httpServer {
+	return &httpServer{
 		Name:            name,
 		Debug:           false,
 		ShutdownTimeout: 10 * time.Second,
@@ -57,7 +59,7 @@ func newDefaultServer(name string) *Server {
 	}
 }
 
-func (s *Server) start() {
+func (s *httpServer) start() {
 	mx := s.buildMux()
 
 	// set up signal handling before starting the server
@@ -65,63 +67,48 @@ func (s *Server) start() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	if s.CertFile == "" || s.KeyFile == "" {
-		if s.Port == 0 {
-			s.Port = 80
-		}
-		server := &http.Server{
-			Addr:         fmt.Sprintf(":%d", s.Port),
-			Handler:      h2c.NewHandler(mx, &http2.Server{}),
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
-			IdleTimeout:  60 * time.Second,
-		}
-
-		go func() {
-			<-quit
-			fmt.Printf("'%s' is shutting down\n", s.Name)
-			ctx, cancel := context.WithTimeout(context.Background(), s.ShutdownTimeout)
-			defer cancel()
-			if err := server.Shutdown(ctx); err != nil {
-				log.PanicErrF("Failed to shutdown server gracefully", err)
-			}
-		}()
-
-		fmt.Printf("'%s' is started on port: %d\n", s.Name, s.Port)
-		err := server.ListenAndServe()
-		if err != nil && err != http.ErrServerClosed {
-			log.PanicErr(err)
-		}
+		s.startH2c(mx, quit)
 	} else {
-		if s.Port == 0 {
-			s.Port = 443
-		}
-		server := http3.Server{
-			Addr:    fmt.Sprintf(":%d", s.Port),
-			Handler: mx,
-		}
-
-		go func() {
-			<-quit
-			fmt.Printf("'%s' is shutting down\n", s.Name)
-			ctx, cancel := context.WithTimeout(context.Background(), s.ShutdownTimeout)
-			defer cancel()
-			if err := server.Shutdown(ctx); err != nil {
-				log.PanicErrF("Failed to shutdown server gracefully", err)
-			}
-		}()
-
-		fmt.Printf("'%s' is started on port: %d\n", s.Name, s.Port)
-		err := server.ListenAndServeTLS(s.CertFile, s.KeyFile)
-		if err != nil && err != http.ErrServerClosed {
-			log.PanicErr(err)
-		}
+		// the HTTP/3 (QUIC) server lives in a build-tagged file, so that a
+		// build without QUIC support does not pull in the quic-go dependency
+		s.startQuic(mx, quit)
 	}
 }
 
-func (s *Server) buildMux() *mux {
-	handlers := make(map[epSig]func(*Context))
+// startH2c starts an HTTP/2 cleartext (h2c) server.
+func (s *httpServer) startH2c(mx http.Handler, quit chan os.Signal) {
+	if s.Port == 0 {
+		s.Port = 80
+	}
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%d", s.Port),
+		Handler:      h2c.NewHandler(mx, &http2.Server{}),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	go func() {
+		<-quit
+		fmt.Printf("'%s' is shutting down\n", s.Name)
+		ctx, cancel := context.WithTimeout(context.Background(), s.ShutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.PanicErrF("Failed to shutdown server gracefully", err)
+		}
+	}()
+
+	fmt.Printf("'%s' is started on port: %d\n", s.Name, s.Port)
+	err := server.ListenAndServe()
+	if err != nil && err != http.ErrServerClosed {
+		log.PanicErr(err)
+	}
+}
+
+func (s *httpServer) buildMux() *mux {
+	handlers := make(map[epSig]func(*requestContext))
 	for _, ep := range s.endpoints {
-		h := func(ctx *Context) {
+		h := func(ctx *requestContext) {
 			err := ep.httpHandler(ctx)
 			if err != nil {
 				serializer := ctx.Value(ctxKeySerializer).(Serializer)
@@ -148,8 +135,8 @@ type epSig struct {
 	pattern string
 }
 
-func (s *Server) buildInputEntityValidateFuncs(inputType reflect.Type) ObjectValidateFunc {
-	fieldVdFuncs := make([]ValidateFunc, inputType.NumField())
+func (s *httpServer) buildInputEntityValidateFuncs(inputType reflect.Type) objectValidateFunc {
+	fieldVdFuncs := make([]validateFunc, inputType.NumField())
 	for i := 0; i < inputType.NumField(); i++ {
 		f := inputType.Field(i)
 		validateTag := f.Tag.Get("validate")
@@ -180,10 +167,18 @@ func (s *Server) buildInputEntityValidateFuncs(inputType reflect.Type) ObjectVal
 		if fieldType.Kind() == reflect.Struct {
 			nestVdFunc := s.buildInputEntityValidateFuncs(fieldType)
 			if nestVdFunc != nil {
-				if fieldVdFuncs[i] == nil {
-					fieldVdFuncs[i] = func(ctx context.Context, fieldIdx int, struValue reflect.Value) error {
-						return nestVdFunc(ctx, struValue.Field(fieldIdx))
+				// The nested field may be a nil pointer at request time: in that
+				// case there is nothing to validate, so the nested validation is
+				// skipped instead of dereferencing the nil pointer.
+				nestedField := func(ctx context.Context, fieldIdx int, struValue reflect.Value) error {
+					fieldValue, ok := dereferenceValue(struValue.Field(fieldIdx))
+					if !ok {
+						return nil
 					}
+					return nestVdFunc(ctx, fieldValue)
+				}
+				if fieldVdFuncs[i] == nil {
+					fieldVdFuncs[i] = nestedField
 				} else {
 					fvdFunc := fieldVdFuncs[i]
 					fieldVdFuncs[i] = func(ctx context.Context, fieldIdx int, struValue reflect.Value) error {
@@ -191,7 +186,7 @@ func (s *Server) buildInputEntityValidateFuncs(inputType reflect.Type) ObjectVal
 						if err != nil {
 							return err
 						}
-						return nestVdFunc(ctx, struValue.Field(fieldIdx))
+						return nestedField(ctx, fieldIdx, struValue)
 					}
 				}
 			}
@@ -201,8 +196,9 @@ func (s *Server) buildInputEntityValidateFuncs(inputType reflect.Type) ObjectVal
 		return nil
 	}
 	return func(ctx context.Context, obj reflect.Value) error {
-		for obj.Kind() == reflect.Pointer {
-			obj = obj.Elem()
+		obj, ok := dereferenceValue(obj)
+		if !ok {
+			return nil
 		}
 		for i := 0; i < obj.NumField(); i++ {
 			if fieldVdFuncs[i] != nil {
@@ -214,6 +210,22 @@ func (s *Server) buildInputEntityValidateFuncs(inputType reflect.Type) ObjectVal
 		}
 		return nil
 	}
+}
+
+// dereferenceValue dereferences the pointer values of the given value. It
+// returns false when the value is invalid or when it is a nil pointer, in
+// which case there is no value to work with.
+func dereferenceValue(value reflect.Value) (reflect.Value, bool) {
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return value, false
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() {
+		return value, false
+	}
+	return value, true
 }
 
 type svrCfg struct {

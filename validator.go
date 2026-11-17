@@ -15,40 +15,49 @@ import (
 
 var emailRegex = regexp.MustCompile(`^[\w-]+(\.[\w-]+)*@[\w-]+(\.[\w-]+)+$`)
 
-func defaultValidators() []Validator {
-	return []Validator{
-		&RequiredValidator{},
-		&RequiredByValidator{},
-		&EitherValidator{},
-		&NumberRangeValidator{},
-		&StringLengthValidator{},
-		&EmailValidator{},
+func defaultValidators() []validator {
+	return []validator{
+		&requiredValidator{},
+		&requiredByValidator{},
+		&eitherValidator{},
+		&numberRangeValidator{},
+		&stringLengthValidator{},
+		&emailValidator{},
 	}
 }
 
-// Validator inspects a struct field's validation tag and, if the tag matches,
+// validator inspects a struct field's validation tag and, if the tag matches,
 // returns a ValidateFunc that performs the actual validation at request time.
-type Validator interface {
+//
+// The exported alias Validator is declared in api.go, which collects the public
+// API surface of the package.
+type validator interface {
 	// ValidateFunc examines the validateTag for the struct field at fieldIdx
 	// within struType and returns a ValidateFunc if the tag is recognized.
-	ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc
+	ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) validateFunc
 }
 
-// ValidateFunc validates a single struct field value. It returns an error
+// validateFunc validates a single struct field value. It returns an error
 // if the field value does not satisfy the validation rule.
-type ValidateFunc func(ctx context.Context, fieldIdx int, struValue reflect.Value) error
+//
+// The exported alias ValidateFunc is declared in api.go, which collects the
+// public API surface of the package.
+type validateFunc func(ctx context.Context, fieldIdx int, struValue reflect.Value) error
 
-// ObjectValidateFunc validates an entire struct value. It is typically built
+// objectValidateFunc validates an entire struct value. It is typically built
 // by composing per-field ValidateFunc instances into a single function.
-type ObjectValidateFunc func(ctx context.Context, obj reflect.Value) error
+//
+// The exported alias ObjectValidateFunc is declared in api.go, which collects
+// the public API surface of the package.
+type objectValidateFunc func(ctx context.Context, obj reflect.Value) error
 
-// RequiredValidator validates that a field is not the zero value when its
+// requiredValidator validates that a field is not the zero value when its
 // validation tag contains "required".
-type RequiredValidator struct{}
+type requiredValidator struct{}
 
 // ValidateFunc checks for a "required" fragment in the validate tag and returns
 // a function that rejects zero-valued fields.
-func (r *RequiredValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
+func (r *requiredValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) validateFunc {
 	frags := strings.Split(validateTag, ";")
 	for _, frag := range frags {
 		if frag == "required" {
@@ -64,13 +73,13 @@ func (r *RequiredValidator) ValidateFunc(validateTag string, fieldIdx int, struT
 	return nil
 }
 
-// RequiredByValidator validates that a field is required when at least one
+// requiredByValidator validates that a field is required when at least one
 // of the named sibling fields is non-zero. The tag format is "required_by=FieldA,FieldB".
-type RequiredByValidator struct{}
+type requiredByValidator struct{}
 
 // ValidateFunc checks for a "required_by=" fragment in the validate tag and returns
 // a function that enforces conditional required validation.
-func (r *RequiredByValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
+func (r *requiredByValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) validateFunc {
 	frags := strings.Split(validateTag, ";")
 	for _, frag := range frags {
 		if strings.HasPrefix(frag, "required_by=") {
@@ -106,13 +115,13 @@ func (r *RequiredByValidator) ValidateFunc(validateTag string, fieldIdx int, str
 	return nil
 }
 
-// EitherValidator validates that, among a set of fields, at least one is
+// eitherValidator validates that, among a set of fields, at least one is
 // non-zero. The tag format is "either=FieldA,FieldB".
-type EitherValidator struct{}
+type eitherValidator struct{}
 
 // ValidateFunc checks for an "either=" fragment in the validate tag and returns
 // a function that ensures at least one of the named fields has a non-zero value.
-func (e *EitherValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
+func (e *eitherValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) validateFunc {
 	frags := strings.Split(validateTag, ";")
 	for _, frag := range frags {
 		if strings.HasPrefix(frag, "either=") {
@@ -148,14 +157,14 @@ func (e *EitherValidator) ValidateFunc(validateTag string, fieldIdx int, struTyp
 	return nil
 }
 
-// NumberRangeValidator validates that a numeric field falls within a specified
+// numberRangeValidator validates that a numeric field falls within a specified
 // range. The tag format uses interval notation: "[min,max]", "(min,max]",
 // "[min,max)", or "(min,max)".
-type NumberRangeValidator struct{}
+type numberRangeValidator struct{}
 
 // ValidateFunc checks for an interval notation fragment in the validate tag and
 // returns a function that validates the numeric field is within the specified bounds.
-func (n *NumberRangeValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
+func (n *numberRangeValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) validateFunc {
 	var bottom, upper string
 	var ge, le bool
 	for _, frag := range strings.Split(validateTag, ";") {
@@ -285,14 +294,14 @@ func (n *NumberRangeValidator) ValidateFunc(validateTag string, fieldIdx int, st
 	}
 }
 
-// StringLengthValidator validates that a string field's length falls within
+// stringLengthValidator validates that a string field's length falls within
 // a specified range. The tag format uses interval notation: "[min,max]",
 // "(min,max]", "[min,max)", or "(min,max)".
-type StringLengthValidator struct{}
+type stringLengthValidator struct{}
 
 // ValidateFunc checks for an interval notation fragment in the validate tag and
 // returns a function that validates the string length is within the specified bounds.
-func (s *StringLengthValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
+func (s *stringLengthValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) validateFunc {
 	var bottom, upper string
 	var ge, le bool
 	for _, frag := range strings.Split(validateTag, ";") {
@@ -351,13 +360,13 @@ func (s *StringLengthValidator) ValidateFunc(validateTag string, fieldIdx int, s
 	}
 }
 
-// EmailValidator validates that a string field is a valid email address when
+// emailValidator validates that a string field is a valid email address when
 // the validation tag contains "email".
-type EmailValidator struct{}
+type emailValidator struct{}
 
 // ValidateFunc checks for an "email" fragment in the validate tag and returns
 // a function that validates the field value matches the email regex pattern.
-func (e *EmailValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) ValidateFunc {
+func (e *emailValidator) ValidateFunc(validateTag string, fieldIdx int, struType reflect.Type) validateFunc {
 	for _, frag := range strings.Split(validateTag, ";") {
 		frag = strings.TrimSpace(frag)
 		if frag == "email" {
