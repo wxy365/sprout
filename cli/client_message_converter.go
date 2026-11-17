@@ -2,11 +2,11 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 
 	"github.com/wxy365/basal/errs"
+	bjson "github.com/wxy365/basal/json"
 )
 
 var (
@@ -25,7 +25,7 @@ type Deserializer func(r io.Reader, params map[string]string, model any) error
 // SerializeJson serializes a model as JSON into a bytes reader for use as the
 // HTTP request body.
 func SerializeJson(model any, bodyKeys []string) (io.Reader, error) {
-	raw, err := json.Marshal(model)
+	raw, err := bjson.Marshal(model)
 	if err != nil {
 		return nil, err
 	}
@@ -42,12 +42,12 @@ func DeserializeJson(r io.Reader, params map[string]string, model any) error {
 	if e, ok := model.(*errs.Err); ok {
 		return deserializeError(raw, e)
 	}
-	return json.Unmarshal(raw, model)
+	return bjson.Unmarshal(raw, model)
 }
 
 func deserializeError(raw []byte, e *errs.Err) error {
 	dto := make(map[string]any)
-	err := json.Unmarshal(raw, &dto)
+	err := bjson.Unmarshal(raw, &dto)
 	if err != nil {
 		return err
 	}
