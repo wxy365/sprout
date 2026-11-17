@@ -253,48 +253,80 @@ func getRateLimiterSettings(limiterName string) *rateLimiterSettings {
 	return nil
 }
 
+// corsOrigin is the pre-computed form of one allowed origin.
+type corsOrigin struct {
+	// origin is the allowed origin, as it is configured.
+	origin string
+	// suffix is the allowed origin with a leading dot, which matches the
+	// subdomains of the origin.
+	suffix string
+	// scheme is the scheme of the allowed origin.
+	scheme string
+	// host is the host of the allowed origin, without its wildcard.
+	host string
+	// valid tells whether the allowed origin could be parsed.
+	valid bool
+}
+
 func newCorsInterceptor() interceptorFunc {
 	corsSettings := getCorsSettings()
 	if corsSettings == nil {
 		return nil
 	}
-	// pre-parse allowed origin URLs
-	parsedOrigins := make([]*url.URL, len(corsSettings.AllowOrigins))
+	// Pre-compute the values that do not change from one request to the next,
+	// so that the interceptor does not rebuild them for every request.
+	origins := make([]corsOrigin, len(corsSettings.AllowOrigins))
 	for i, allowOrigin := range corsSettings.AllowOrigins {
-		u, err := url.Parse(allowOrigin)
-		if err == nil {
-			parsedOrigins[i] = u
+		origin := corsOrigin{origin: allowOrigin, suffix: "." + allowOrigin}
+		if u, err := url.Parse(allowOrigin); err == nil {
+			origin.scheme = u.Scheme
+			origin.host = strings.ReplaceAll(u.Host, "*", "")
+			origin.valid = true
 		}
+		origins[i] = origin
+	}
+	allowMethods := strings.Join(corsSettings.AllowMethods, ",")
+	allowHeaders := strings.Join(corsSettings.AllowHeaders, ",")
+	maxAge := ""
+	if corsSettings.MaxAge > 0 {
+		maxAge = strconv.Itoa(corsSettings.MaxAge)
 	}
 	return func(next func(*requestContext) error) func(ctx *requestContext) error {
 		return func(ctx *requestContext) error {
 			origin := ctx.Request.Header.Get("Origin")
-			if origin != "" && len(corsSettings.AllowOrigins) > 0 {
-				for i, allowOrigin := range corsSettings.AllowOrigins {
-					if origin == allowOrigin || strings.HasSuffix(origin, "." + allowOrigin) {
+			if origin != "" && len(origins) > 0 {
+				// The origin of the request is parsed at most once.
+				var originUrl *url.URL
+				var originErr error
+				parsed := false
+				for _, allowed := range origins {
+					if origin == allowed.origin || strings.HasSuffix(origin, allowed.suffix) {
 						ctx.Writer.Header().Set("Access-Control-Allow-Origin", origin)
-					} else {
-						originUrl, err := url.Parse(origin)
-						if err != nil {
-							return errs.Wrap(err, "failed to parse origin")
-						}
-						if parsedOrigins[i] != nil && originUrl.Scheme == parsedOrigins[i].Scheme && strings.HasSuffix(originUrl.Host, strings.Replace(parsedOrigins[i].Host, "*", "", -1)) {
-							ctx.Writer.Header().Set("Access-Control-Allow-Origin", origin)
-						}
+						continue
+					}
+					if !parsed {
+						originUrl, originErr = url.Parse(origin)
+						parsed = true
+					}
+					if originErr != nil {
+						return errs.Wrap(originErr, "failed to parse origin")
+					}
+					if allowed.valid && originUrl.Scheme == allowed.scheme && strings.HasSuffix(originUrl.Host, allowed.host) {
+						ctx.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 					}
 				}
 			}
-			if len(corsSettings.AllowMethods) > 0 {
-				ctx.Writer.Header().Set("Access-Control-Allow-Methods", strings.Join(corsSettings.AllowMethods, ","))
+			if allowMethods != "" {
+				ctx.Writer.Header().Set("Access-Control-Allow-Methods", allowMethods)
 			}
-			if len(corsSettings.AllowHeaders) > 0 {
-				ctx.Writer.Header().Set("Access-Control-Allow-Headers", strings.Join(corsSettings.AllowHeaders, ","))
+			if allowHeaders != "" {
+				ctx.Writer.Header().Set("Access-Control-Allow-Headers", allowHeaders)
 			}
 			if corsSettings.AllowCredentials != nil && *corsSettings.AllowCredentials {
 				ctx.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 			}
-			if corsSettings.MaxAge > 0 {
-				ctx.Writer.Header().Set("Access-Control-Max-Age", strconv.Itoa(corsSettings.MaxAge))
+			if maxAge != "" {
+				ctx.Writer.Header().Set("Access-Control-Max-Age", maxAge)
 			}
 			return next(ctx)
 		}

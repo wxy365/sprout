@@ -1,7 +1,6 @@
 package sprout
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"reflect"
@@ -119,8 +118,7 @@ func (e *endpoint[I, O]) appendToServer(svr *httpServer, decrypters map[string]f
 			if svr.Debug {
 				log.ErrorErrF(`Endpoint [{0}] failed to process the request`, err, r.name)
 			}
-			newRequest := ctx.Request.WithContext(context.WithValue(ctx, ctxKeyEndpointError, err))
-			*ctx.Request = *newRequest
+			ctx.setEndpointError(err)
 			return err
 		}
 

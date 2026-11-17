@@ -1,7 +1,6 @@
 package sprout
 
 import (
-	"context"
 	"errors"
 	"mime"
 	"net/http"
@@ -168,15 +167,26 @@ func newSection(parent section, i int, parts []string, method string, h func(ctx
 //
 // The media types that carry no parameter are recognised without the full
 // parsing, because mime.ParseMediaType is expensive and the headers are read
-// on every request. The wildcard media type is reported as the JSON media
-// type, which is the format the framework falls back to.
-func parseMediaType(header string) (string, map[string]string) {
-	if i := strings.IndexByte(header, ';'); i < 0 {
+// on every request. The parameters are parsed only when they are asked for:
+// they are needed by the multipart deserializer alone. The wildcard media type
+// is reported as the JSON media type, which is the format the framework falls
+// back to.
+//
+// A media type that the framework does not know is parsed in full, so that a
+// header that the mime package rejects keeps falling back to the JSON media
+// type, while a media type that it accepts is reported as it is.
+func parseMediaType(header string, wantParams bool) (string, map[string]string) {
+	i := strings.IndexByte(header, ';')
+	if i < 0 {
 		mediaType := strings.ToLower(strings.TrimSpace(header))
 		if mediaType == "" || mediaType == "*/*" {
 			return MimeJson, nil
 		}
 		return mediaType, nil
+	}
+	base := strings.ToLower(strings.TrimSpace(header[:i]))
+	if base != "" && isKnownMediaType(base) && !wantParams && simpleParamsOK(header[i+1:]) {
+		return base, nil
 	}
 	mediaType, params, err := mime.ParseMediaType(header)
 	if err != nil {
@@ -185,11 +195,128 @@ func parseMediaType(header string) (string, map[string]string) {
 	if mediaType == "*/*" {
 		return MimeJson, params
 	}
+	if !wantParams {
+		params = nil
+	}
 	return mediaType, params
 }
 
+// isKnownMediaType reports whether the media type is one of the types that
+// the framework supports.
+func isKnownMediaType(mediaType string) bool {
+	switch mediaType {
+	case mimeJson, mimeHtml, mimeText, mimeMultipartForm, mimeUrlencodedForm, mimePdf:
+		return true
+	}
+	return false
+}
+
+// simpleParamsOK reports whether the parameters of a media type header are
+// simple enough for the media type to be used without the full parsing: every
+// parameter is a plain token, without a quoted string.
+//
+// The parameters are the ones that follow the first semicolon of the header.
+//
+// A header whose parameters are not simple is parsed in full, so that a
+// malformed header keeps falling back to the JSON media type. A parameter that
+// this function rejects is therefore never wrong, it is only slower.
+func simpleParamsOK(params string) bool {
+	for {
+		// the spaces that separate the parameters
+		i := 0
+		for i < len(params) && isMediaSpace(params[i]) {
+			i++
+		}
+		params = params[i:]
+		if len(params) == 0 {
+			return true
+		}
+		if params[0] == ';' {
+			// a trailing semicolon is accepted by the mime package
+			params = params[1:]
+			for len(params) > 0 && isMediaSpace(params[0]) {
+				params = params[1:]
+			}
+			return len(params) == 0
+		}
+		// the name of the parameter
+		i = 0
+		for i < len(params) && isMediaTokenChar(params[i]) {
+			i++
+		}
+		if i == 0 {
+			return false
+		}
+		params = params[i:]
+		for len(params) > 0 && isMediaSpace(params[0]) {
+			params = params[1:]
+		}
+		if len(params) == 0 || params[0] != '=' {
+			return false
+		}
+		params = params[1:]
+		for len(params) > 0 && isMediaSpace(params[0]) {
+			params = params[1:]
+		}
+		if len(params) == 0 {
+			return false
+		}
+		if params[0] == '"' {
+			// a quoted string needs the full parsing
+			return false
+		}
+		// the value of the parameter
+		i = 0
+		for i < len(params) && isMediaTokenChar(params[i]) {
+			i++
+		}
+		if i == 0 {
+			return false
+		}
+		params = params[i:]
+		// the separator of the next parameter
+		i = 0
+		for i < len(params) && isMediaSpace(params[i]) {
+			i++
+		}
+		params = params[i:]
+		if len(params) == 0 {
+			return true
+		}
+		if params[0] != ';' {
+			return false
+		}
+		params = params[1:]
+	}
+}
+
+// isMediaSpace reports whether the byte is one of the spaces that separate
+// the parts of a media type header.
+func isMediaSpace(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '\v', '\f':
+		return true
+	}
+	return false
+}
+
+// isMediaTokenChar reports whether the byte may appear in a token of a media
+// type header. The set is a subset of the tokens that the mime package
+// accepts, so a parameter that this function accepts is always a valid one.
+func isMediaTokenChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	switch c {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
+}
+
 func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	acceptType, _ := parseMediaType(r.Header.Get("Accept"))
+	acceptType, _ := parseMediaType(r.Header.Get("Accept"), false)
 	serializer := serializers[acceptType]
 	if serializer == nil {
 		serializer = serializers[MimeJson]
@@ -205,15 +332,14 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	r = r.WithContext(context.WithValue(r.Context(), ctxKeySerializer, serializer))
-
-	r = r.WithContext(context.WithValue(r.Context(), ctxKeyAcceptType, acceptType))
-
-	contentType, params := parseMediaType(r.Header.Get("Content-Type"))
+	contentTypeHeader := r.Header.Get("Content-Type")
+	contentType, params := parseMediaType(contentTypeHeader, false)
 	deserializer := deserializers[contentType]
-	r = r.WithContext(context.WithValue(r.Context(), ctxKeyDeserializer, deserializer))
-	if len(params) > 0 {
-		r = r.WithContext(context.WithValue(r.Context(), ctxKeyContentTypeParams, params))
+	if contentType == mimeMultipartForm {
+		// The multipart deserializer is the only one that needs the
+		// parameters of the content type, so they are parsed for it alone.
+		contentType, params = parseMediaType(contentTypeHeader, true)
+		deserializer = deserializers[contentType]
 	}
 
 	if m.root == nil {
@@ -224,6 +350,7 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rootFm, _, _ := m.root.finalMatch(r.Method, "")
 
 	var handler func(*requestContext)
+	var pathParams map[string]string
 	if path == "" || path == "/" {
 		if !rootFm {
 			serialize(errs.New("Resource not found").WithStatus(http.StatusNotFound))
@@ -231,35 +358,25 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		handler = m.root.handler(r.Method)
 	} else {
-		theOne := new(section)
-		pathParams := make(map[section][2]string)
+		var theOne section
 		if rootFm {
-			*theOne = m.root
+			theOne = m.root
 		}
 		if len(m.root.chdn) > 0 {
-			parts := strings.Split(path, "/")
-			if parts[0] == "" {
-				parts = parts[1:]
+			offset := 0
+			if path[0] == '/' {
+				offset = 1
 			}
 			for _, s := range m.root.children() {
-				match(s, 0, parts, r.Method, pathParams, theOne)
+				theOne = match(s, path, offset, r.Method, theOne)
 			}
 		}
-		if *theOne == nil {
+		if theOne == nil {
 			serialize(errs.New("Resource not found").WithStatus(http.StatusNotFound))
 			return
 		}
-		if len(pathParams) > 0 {
-			pm := make(map[string]string)
-			for s := *theOne; s != nil; {
-				if param, exists := pathParams[s]; exists {
-					pm[param[0]] = param[1]
-				}
-				s = s.parent()
-			}
-			r = r.WithContext(context.WithValue(r.Context(), ctxKeyPathParams, pm))
-		}
-		handler = (*theOne).handler(r.Method)
+		pathParams = collectPathParams(theOne, path)
+		handler = theOne.handler(r.Method)
 	}
 
 	if handler == nil {
@@ -270,37 +387,113 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The context is built at the dispatch point, so that the handler always
 	// sees a request carrying every context value: the serializer, the
 	// deserializer, the accept type, the content type parameters and the path
-	// parameters. http.Request.WithContext returns a shallow copy, so building
-	// the context earlier would leave it pointing at a request without the path
-	// parameters attached.
+	// parameters. The values travel in a single context, instead of a chain
+	// of context.WithValue calls, each of which allocated a value context
+	// and a copy of the request.
 	ctx := &requestContext{
 		Request: r,
 		Writer:  w,
 	}
+	ctx.values.parent = r.Context()
+	ctx.values.serializer = serializer
+	ctx.values.acceptType = acceptType
+	ctx.values.deserializer = deserializer
+	ctx.values.contentTypeParams = params
+	ctx.values.pathParams = pathParams
+	ctx.Request = r.WithContext(&ctx.values)
 
 	handler(ctx)
 }
 
-func match(s section, idx int, uriParts []string, method string, pathParams map[section][2]string, theOne *section) {
-	part := uriParts[idx]
-	if ok, k, v := s.finalMatch(method, part); ok {
-		if *theOne == nil || s.level() > (*theOne).level() || s.level() == (*theOne).level() && s.weight() > (*theOne).weight() {
-			*theOne = s
-			if len(k) > 0 {
-				pathParams[s] = [2]string{k, v}
-			}
+// match matches the section against the segment of the path that starts at
+// the given offset, and returns the best matching section found so far.
+//
+// The path is not split into a slice of segments: the segments are read one
+// by one, so that the routing does not allocate.
+func match(s section, path string, offset int, method string, best section) section {
+	end := len(path)
+	if i := strings.IndexByte(path[offset:], '/'); i >= 0 {
+		end = offset + i
+	}
+	part := path[offset:end]
+	if ok, _, _ := s.finalMatch(method, part); ok {
+		if best == nil || s.level() > best.level() || s.level() == best.level() && s.weight() > best.weight() {
+			best = s
 		}
 	}
-	if ok, k, v := s.middleMatch(part); ok {
-		if len(k) > 0 {
-			pathParams[s] = [2]string{k, v}
-		}
-		if idx+1 < len(uriParts) {
-			for _, chdn := range s.children() {
-				match(chdn, idx+1, uriParts, method, pathParams, theOne)
-			}
+	if ok, _, _ := s.middleMatch(part); ok && end < len(path) {
+		for _, chdn := range s.children() {
+			best = match(chdn, path, end+1, method, best)
 		}
 	}
+	return best
+}
+
+// collectPathParams collects the path parameters of the matched route.
+//
+// The parameters are collected from the matched section up to the root: every
+// section of the chain contributes the parameter that it captured, if any.
+// The sections are visited from the deepest one to the shallowest one, so that
+// the parameter of the shallowest section wins, as it did when the parameters
+// were collected in a map.
+func collectPathParams(theOne section, path string) map[string]string {
+	// The chain of the matched section, from the deepest one to the root.
+	var chainArr [maxPathDepth]section
+	chain := chainArr[:0]
+	for s := theOne; s != nil && s.level() > 0; s = s.parent() {
+		chain = append(chain, s)
+	}
+	if len(chain) == 0 {
+		return nil
+	}
+
+	// The boundaries of the segments of the path. A section of the level n
+	// matched the segment n-1 of the path.
+	var segmentArr [maxPathDepth]pathSegment
+	segments := segmentArr[:0]
+	offset := 0
+	if len(path) > 0 && path[0] == '/' {
+		offset = 1
+	}
+	for len(segments) < len(chain) {
+		end := len(path)
+		if i := strings.IndexByte(path[offset:], '/'); i >= 0 {
+			end = offset + i
+		}
+		segments = append(segments, pathSegment{start: offset, end: end})
+		if end >= len(path) {
+			break
+		}
+		offset = end + 1
+	}
+
+	var pathParams map[string]string
+	for _, s := range chain {
+		name := s.paramName()
+		if name == "" {
+			continue
+		}
+		lvl := s.level()
+		if lvl < 1 || lvl > len(segments) {
+			continue
+		}
+		segment := segments[lvl-1]
+		if pathParams == nil {
+			pathParams = make(map[string]string, 2)
+		}
+		pathParams[name] = path[segment.start:segment.end]
+	}
+	return pathParams
+}
+
+// maxPathDepth is the number of path segments that the router handles
+// without allocating. A deeper path falls back to an allocated slice.
+const maxPathDepth = 16
+
+// pathSegment is the boundary of one segment of the request path.
+type pathSegment struct {
+	start int
+	end   int
 }
 
 type section interface {
@@ -313,6 +506,7 @@ type section interface {
 	handler(method string) func(ctx *requestContext)
 	handlerMap() map[string]func(ctx *requestContext)
 	pattern() string
+	paramName() string
 	addHandler(method string, h func(ctx *requestContext))
 	addChild(section)
 }
@@ -361,6 +555,12 @@ func (b *baseSection) weight() int {
 
 func (b *baseSection) pattern() string {
 	return b.patn
+}
+
+// paramName returns the name of the path parameter that the section captures.
+// The sections that capture no parameter return an empty name.
+func (b *baseSection) paramName() string {
+	return ""
 }
 
 func (b *baseSection) handlerMap() map[string]func(ctx *requestContext) {
@@ -476,6 +676,11 @@ func (n *namedSection) weight() int {
 	return 8
 }
 
+// paramName returns the name of the path parameter that the section captures.
+func (n *namedSection) paramName() string {
+	return n.name
+}
+
 type namedRegexpSection struct {
 	baseSection
 	name string
@@ -498,6 +703,11 @@ func (n *namedRegexpSection) middleMatch(uriPart string) (bool, string, string) 
 
 func (n *namedRegexpSection) weight() int {
 	return 52
+}
+
+// paramName returns the name of the path parameter that the section captures.
+func (n *namedRegexpSection) paramName() string {
+	return n.name
 }
 
 // /*
