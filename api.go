@@ -129,6 +129,28 @@ type (
 	//
 	// See context.go for the implementation.
 	Context = requestContext
+	// SSEEvent represents a server-sent event. Its fields map one to one onto
+	// the SSE protocol: the identifier, the name, the payload and the
+	// reconnection interval.
+	//
+	// See sse.go for the implementation.
+	SSEEvent = sseEvent
+	// SSEStream writes server-sent events to an HTTP response. The framework
+	// creates it and hands it over to the business logic of an SSE endpoint.
+	//
+	// See sse.go for the implementation.
+	SSEStream = sseStream
+	// SSEHandler is the function signature for the business logic of an SSE
+	// endpoint. It receives a request context, a deserialized input struct and
+	// the stream the events are written to.
+	//
+	// See sse.go for the implementation.
+	SSEHandler[I any] = sseHandlerFunc[I]
+	// SSEEndpoint defines an SSE endpoint with its pattern, HTTP methods,
+	// business logic handler, interceptors and error handler.
+	//
+	// See sse.go for the implementation.
+	SSEEndpoint[I any] = sseEndpoint[I]
 )
 
 const (
@@ -144,6 +166,8 @@ const (
 	MimeHtml = mimeHtml
 	// MimePdf is the MIME type for PDF content.
 	MimePdf = mimePdf
+	// MimeEventStream is the MIME type for server-sent events.
+	MimeEventStream = mimeEventStream
 )
 
 var (
@@ -162,6 +186,16 @@ var (
 // See app.go for the implementation.
 func Mount[C any, I any, O any](e *Endpoint[I, O], a *App[C], svrName ...string) {
 	mount(e, a, svrName...)
+}
+
+// MountSSE registers an SSE endpoint onto a server within the application.
+// The endpoint is wired up via an AppInitializer, ensuring it is registered before
+// the server starts. If no server name is provided, the endpoint is mounted on
+// the first server in the App.Servers slice.
+//
+// See app.go for the implementation.
+func MountSSE[C any, I any](e *SSEEndpoint[I], a *App[C], svrName ...string) {
+	mountSSE(e, a, svrName...)
 }
 
 // RegisterClientIdentifier registers a named client identifier function that

@@ -204,23 +204,43 @@ type appInitializer[C any] func(a *App[C]) error
 // The exported wrapper Mount is declared in api.go, which collects the public
 // API surface of the package.
 func mount[C any, I any, O any](e *Endpoint[I, O], a *App[C], svrName ...string) {
+	mountEndpoint(a, svrName, e.Name, e.appendToServer)
+}
+
+// mountSSE registers an SSE endpoint onto a server within the application.
+//
+// The exported wrapper MountSSE is declared in api.go, which collects the
+// public API surface of the package.
+func mountSSE[C any, I any](e *SSEEndpoint[I], a *App[C], svrName ...string) {
+	mountEndpoint(a, svrName, e.Name, e.appendToServer)
+}
+
+// mountEndpoint wires an endpoint onto a server within the application. The
+// endpoint is wired up via an AppInitializer, ensuring it is registered before
+// the server starts. If no server name is provided, the endpoint is mounted on
+// the first server in the App.Servers slice.
+//
+// The appendToServer is the registration logic of the endpoint itself, which
+// the ordinary endpoints and the SSE endpoints provide on their own.
+func mountEndpoint[C any](a *App[C], svrName []string, endpointName string,
+	appendToServer func(svr *httpServer, decrypters map[string]func(cipher []byte) ([]byte, error))) {
 	a.Initializers = append(a.Initializers, func(app *App[C]) error {
 		if len(svrName) == 0 {
 			if len(app.Servers) == 0 {
 				app.Servers = append(app.Servers, newDefaultServer(app.Name+"_server"))
 			}
-			e.appendToServer(app.Servers[0], app.DecryptFns)
+			appendToServer(app.Servers[0], app.DecryptFns)
 		} else {
 			var mounted bool
 			for _, svr := range app.Servers {
 				if svr.Name == svrName[0] {
-					e.appendToServer(svr, app.DecryptFns)
+					appendToServer(svr, app.DecryptFns)
 					mounted = true
 					break
 				}
 			}
 			if !mounted {
-				log.Panic("Failed to mount endpoint [{0}] to server [{1}]: server not defined", e.Name, svrName[0])
+				log.Panic("Failed to mount endpoint [{0}] to server [{1}]: server not defined", endpointName, svrName[0])
 			}
 		}
 		return nil
