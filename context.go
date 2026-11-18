@@ -74,6 +74,19 @@ func (c *requestContext) setEndpointError(err error) {
 	*c.Request = *newRequest
 }
 
+// setSSEStream records the stream of the SSE endpoint that is serving the
+// request, so that the error handler can tell whether the response has already
+// been committed.
+func (c *requestContext) setSSEStream(stream *sseStream) {
+	c.values.sseStream = stream
+}
+
+// sseStreamOf returns the stream of the SSE endpoint that is serving the
+// request, or nil when the request is not served by an SSE endpoint.
+func (c *requestContext) sseStreamOf() *sseStream {
+	return c.values.sseStream
+}
+
 // ctxValues carries the values that the framework attaches to every request.
 //
 // The dispatcher used to attach them one by one, with a context.WithValue call
@@ -97,6 +110,9 @@ type ctxValues struct {
 	pathParams map[string]string
 	// endpointErr is the error that the endpoint returned.
 	endpointErr error
+	// sseStream is the stream of the SSE endpoint that is serving the request.
+	// It is nil for the requests that are not served by an SSE endpoint.
+	sseStream *sseStream
 }
 
 // Deadline returns the deadline of the context that the request carried.

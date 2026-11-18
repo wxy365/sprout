@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/wxy365/basal/errs"
 )
 
 // TestSSEEventEncode verifies the wire format of an SSE frame.
@@ -298,5 +300,187 @@ func TestSSEStreamConcurrentSend(t *testing.T) {
 	body := rec.Body.String()
 	if got := strings.Count(body, "data: 0123456789\n\n"); got != 80 {
 		t.Errorf("the number of the complete frames = %d, want %d", got, 80)
+	}
+}
+
+// sseInput is the input entity used by the SSE endpoint tests.
+type sseInput struct {
+	Name  string `query:"name"`
+	Count int    `query:"count" validate:"[1,10]"`
+}
+
+// serveSSE mounts the given SSE endpoint on a fresh server and serves one
+// request against it. It returns the recorder holding the response.
+func serveSSE[I any](t *testing.T, e *sseEndpoint[I], req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	svr := newDefaultServer("test")
+	e.appendToServer(svr, nil)
+	mx := svr.buildMux()
+	rec := httptest.NewRecorder()
+	mx.ServeHTTP(rec, req)
+	return rec
+}
+
+// assertSSEBody verifies that every line of the body belongs to an SSE frame,
+// so that a plain JSON error never leaks into the stream.
+func assertSSEBody(t *testing.T, body string) {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		ok := strings.HasPrefix(line, "data: ") ||
+			strings.HasPrefix(line, "event: ") ||
+			strings.HasPrefix(line, "id: ") ||
+			strings.HasPrefix(line, "retry: ") ||
+			strings.HasPrefix(line, ": ")
+		if !ok {
+			t.Errorf("the line %q is not part of an SSE frame", line)
+		}
+	}
+}
+
+// TestSSEEndpointSuccess verifies the happy path of an SSE endpoint.
+func TestSSEEndpointSuccess(t *testing.T) {
+	e := &sseEndpoint[sseInput]{
+		Name:    "sse",
+		Pattern: "/sse",
+		Methods: []string{http.MethodGet},
+		Handler: func(ctx *requestContext, in sseInput, stream *sseStream) error {
+			return stream.Send(sseEvent{Event: "tick", Data: "hello " + in.Name})
+		},
+	}
+
+	rec := serveSSE(t, e, httptest.NewRequest(http.MethodGet, "/sse?name=foo", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the status code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := rec.Header().Get("Content-Type"); got != mimeEventStream {
+		t.Errorf("the Content-Type header = %q, want %q", got, mimeEventStream)
+	}
+	want := "event: tick\ndata: hello foo\n\n"
+	if rec.Body.String() != want {
+		t.Errorf("the body = %q, want %q", rec.Body.String(), want)
+	}
+}
+
+// TestSSEEndpointLazyCommit verifies that an endpoint that writes nothing
+// still answers with a well formed but empty SSE response.
+func TestSSEEndpointLazyCommit(t *testing.T) {
+	e := &sseEndpoint[sseInput]{
+		Name:    "sse",
+		Pattern: "/sse",
+		Methods: []string{http.MethodGet},
+		Handler: func(ctx *requestContext, in sseInput, stream *sseStream) error {
+			return nil
+		},
+	}
+
+	rec := serveSSE(t, e, httptest.NewRequest(http.MethodGet, "/sse", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the status code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := rec.Header().Get("Content-Type"); got != mimeEventStream {
+		t.Errorf("the Content-Type header = %q, want %q", got, mimeEventStream)
+	}
+	if len(rec.Body.Bytes()) != 0 {
+		t.Errorf("the body should be empty, but got: %q", rec.Body.String())
+	}
+}
+
+// TestSSEEndpointErrorBeforeCommit verifies that an error that happens before
+// the first event is reported with its own status code and a plain JSON body.
+func TestSSEEndpointErrorBeforeCommit(t *testing.T) {
+	e := &sseEndpoint[sseInput]{
+		Name:    "sse",
+		Pattern: "/sse",
+		Methods: []string{http.MethodGet},
+		Handler: func(ctx *requestContext, in sseInput, stream *sseStream) error {
+			return errs.New("something went wrong").WithStatus(http.StatusConflict)
+		},
+	}
+
+	rec := serveSSE(t, e, httptest.NewRequest(http.MethodGet, "/sse", nil))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("the status code = %d, want %d", rec.Code, http.StatusConflict)
+	}
+	if !strings.Contains(rec.Body.String(), "something went wrong") {
+		t.Errorf("the body should contain the error message, but got: %s", rec.Body.String())
+	}
+}
+
+// TestSSEEndpointErrorAfterCommit verifies that an error that happens after
+// the first event is reported as an error event, because the status code can
+// no longer be changed.
+func TestSSEEndpointErrorAfterCommit(t *testing.T) {
+	e := &sseEndpoint[sseInput]{
+		Name:    "sse",
+		Pattern: "/sse",
+		Methods: []string{http.MethodGet},
+		Handler: func(ctx *requestContext, in sseInput, stream *sseStream) error {
+			if err := stream.Send(sseEvent{Data: "before"}); err != nil {
+				return err
+			}
+			return errs.New("something went wrong").WithStatus(http.StatusConflict)
+		},
+	}
+
+	rec := serveSSE(t, e, httptest.NewRequest(http.MethodGet, "/sse", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the status code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if !strings.Contains(rec.Body.String(), "data: before\n\n") {
+		t.Errorf("the first event is missing, but got: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "event: error\n") {
+		t.Errorf("the error event is missing, but got: %s", rec.Body.String())
+	}
+	assertSSEBody(t, rec.Body.String())
+}
+
+// TestSSEEndpointPanicRecovered verifies that a panic in the handler becomes
+// an error event instead of a JSON body mixed into the stream.
+func TestSSEEndpointPanicRecovered(t *testing.T) {
+	e := &sseEndpoint[sseInput]{
+		Name:    "sse",
+		Pattern: "/sse",
+		Methods: []string{http.MethodGet},
+		Handler: func(ctx *requestContext, in sseInput, stream *sseStream) error {
+			if err := stream.Send(sseEvent{Data: "before"}); err != nil {
+				return err
+			}
+			panic("boom")
+		},
+	}
+
+	rec := serveSSE(t, e, httptest.NewRequest(http.MethodGet, "/sse", nil))
+
+	if !strings.Contains(rec.Body.String(), "event: error\n") {
+		t.Errorf("the error event is missing, but got: %s", rec.Body.String())
+	}
+	assertSSEBody(t, rec.Body.String())
+}
+
+// TestSSEEndpointValidationFailure verifies that an invalid input is rejected
+// before the stream is opened.
+func TestSSEEndpointValidationFailure(t *testing.T) {
+	e := &sseEndpoint[sseInput]{
+		Name:    "sse",
+		Pattern: "/sse",
+		Methods: []string{http.MethodGet},
+		Handler: func(ctx *requestContext, in sseInput, stream *sseStream) error {
+			t.Error("the handler should not be called for an invalid input")
+			return nil
+		},
+	}
+
+	rec := serveSSE(t, e, httptest.NewRequest(http.MethodGet, "/sse?count=99", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("the status code = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }

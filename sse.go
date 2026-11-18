@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/wxy365/basal/ds/slices"
 	"github.com/wxy365/basal/errs"
 	bjson "github.com/wxy365/basal/json"
 	"github.com/wxy365/basal/log"
@@ -330,4 +332,159 @@ func (s *sseStream) keepAlive(interval time.Duration) {
 			return
 		}
 	}
+}
+
+// sseHandlerFunc is the signature of the business logic of an SSE endpoint.
+// It writes the events to the stream synchronously and ends the connection
+// when it returns.
+//
+// The exported alias SSEHandler is declared in api.go, which collects the
+// public API surface of the package.
+type sseHandlerFunc[I any] func(ctx *requestContext, in I, stream *sseStream) error
+
+// sseEndpoint defines an SSE endpoint with its pattern, HTTP methods,
+// business logic handler, interceptors and error handler.
+//
+// The exported alias SSEEndpoint is declared in api.go, which collects the
+// public API surface of the package.
+type sseEndpoint[I any] struct {
+	// Name is the endpoint name, used for logging and circuit breaker identification.
+	Name string
+	// Pattern is the URI path pattern, supporting static segments, named parameters
+	// (e.g. {id}), regex parameters (e.g. {name:~re}), format specifiers (%s, %d),
+	// and wildcards (*).
+	Pattern string
+	// Methods is the list of HTTP methods this endpoint responds to (e.g. GET, POST).
+	Methods []string
+	// Handler is the business logic function that writes the events.
+	Handler sseHandlerFunc[I]
+	// Interceptors is the list of interceptors applied to this endpoint. Built-in
+	// interceptors (panic recovery, circuit breaker, rate limiter, CORS) are added
+	// automatically during registration.
+	Interceptors []interceptorFunc
+	// ErrorHandler is the error handler for this endpoint. If nil, the server-level
+	// error handler is used as a fallback.
+	ErrorHandler errorHandlerFunc
+	// KeepAlive is the interval of the keep alive comments. It is greater than
+	// zero when the endpoint keeps its connection alive. Zero turns it off.
+	KeepAlive time.Duration
+}
+
+func (e *sseEndpoint[I]) appendToServer(svr *httpServer, decrypters map[string]func(cipher []byte) ([]byte, error)) {
+	// validate endpoint methods
+	for _, mth := range e.Methods {
+		if slices.Lookup(allowedMethods, mth, func(left, right string) bool {
+			return left == right
+		}) < 0 {
+			panic("Invalid http method: " + mth)
+		}
+	}
+
+	// validate endpoint input type
+	var input I
+	inputType := reflect.TypeOf(input)
+	for inputType.Kind() == reflect.Pointer {
+		inputType = inputType.Elem()
+	}
+	if inputType.Kind() != reflect.Struct {
+		log.Panic("SSE endpoint ({0}) input type must be a struct, but got: [{1}]", e.Name, inputType)
+	}
+
+	r := &refinedEndpoint{
+		name:    e.Name,
+		pattern: e.Pattern,
+		methods: e.Methods,
+	}
+
+	validateFunc := svr.buildInputEntityValidateFuncs(inputType)
+
+	errHandler := e.ErrorHandler
+	if errHandler == nil {
+		errHandler = svr.ErrorHandler
+	}
+	if errHandler == nil {
+		errHandler = defaultErrHandler
+	}
+
+	httpHandler := func(ctx *requestContext) error {
+		var in I
+		err := parseHttpRequest(&in, ctx.Request, decrypters)
+		if err != nil {
+			return errs.Wrap(err, "Failed to parse request of endpoint [{0}]", e.Name).WithStatus(http.StatusBadRequest)
+		}
+		err = validateFunc(ctx, reflect.ValueOf(in))
+		if err != nil {
+			return err
+		}
+
+		if svr.Debug {
+			inputStr, _ := bjson.Marshal(in)
+			log.Debug(`SSE endpoint [{0}] input: {1}`, r.name, string(inputStr))
+		}
+
+		stream := newSSEStream(ctx, e.KeepAlive)
+		// The stream is recorded in the values of the request, so that the
+		// error handler can tell whether the response has been committed.
+		ctx.setSSEStream(stream)
+
+		handlerErr := callSSEHandler(e.Handler, ctx, in, stream)
+		if handlerErr != nil {
+			// The error is recorded in the values of the request, so that the
+			// circuit breaker can tell that the request failed.
+			ctx.setEndpointError(handlerErr)
+			if stream.isCommitted() {
+				// The response has been committed, so the status code can no
+				// longer be changed and the error is reported as an event.
+				stream.sendError(handlerErr)
+				stream.Close()
+				return nil
+			}
+			return handlerErr
+		}
+		stream.Close()
+		return nil
+	}
+
+	ics := []interceptorFunc{recoverInterceptor}
+	circuitBreaker := newCircuitBreakerInterceptor(r.name)
+	ics = append(ics, circuitBreaker)
+	rateLimiter := newRateLimiterInterceptor(r.name)
+	ics = append(ics, rateLimiter)
+	corsInterceptor := newCorsInterceptor()
+	if corsInterceptor != nil {
+		ics = append(ics, corsInterceptor)
+	}
+	// The interceptors of the endpoint are applied after the built-in ones, so
+	// that the built-in panic recovery stays the outermost interceptor.
+	ics = append(ics, e.Interceptors...)
+	httpHandler = appendServerInterceptors(httpHandler, ics...)
+	r.httpHandler = func(ctx *requestContext) error {
+		err := httpHandler(ctx)
+		if err != nil {
+			if stream := ctx.sseStreamOf(); stream != nil && stream.isCommitted() {
+				// The response has been committed, so the error is reported as
+				// an event instead of a status code.
+				stream.sendError(err)
+				stream.Close()
+				return nil
+			}
+			errHandler(ctx, err)
+		}
+		return nil
+	}
+
+	svr.endpoints = append(svr.endpoints, r)
+}
+
+// callSSEHandler calls the business logic of an SSE endpoint and turns a
+// panic into an error, so that a panic never leaks a plain JSON body into
+// the stream.
+func callSSEHandler[I any](handler sseHandlerFunc[I], ctx *requestContext, in I, stream *sseStream) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("Panic recovered in SSE endpoint: {0} {1}", ctx.Request.Method, ctx.Request.URL.Path)
+			err = errs.New("Internal Server Error").WithStatus(http.StatusInternalServerError)
+		}
+	}()
+	return handler(ctx, in, stream)
 }
