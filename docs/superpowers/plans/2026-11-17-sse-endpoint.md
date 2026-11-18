@@ -19,23 +19,27 @@
 - 对方即将把 `(*httpServer).buildInputEntityValidateFuncs` 抽成包级函数 `buildInputEntityValidateFuncs(validators []validator, inputType reflect.Type) objectValidateFunc`。本计划调用的是**现有的方法形式** `svr.buildInputEntityValidateFuncs(inputType)`，对方抽取后是机械替换。
 - 命名约束：核心包内**不要**使用 `Runner`、`Component`、`Lifecycle` 这些标识符（对方要占用 `Runner`）。本计划新增的名字只有 `SSEEvent`、`SSEStream`、`SSEHandler`、`SSEEndpoint`、`MountSSE`、`MimeEventStream`，内部类型 `sseEvent`、`sseStream`、`sseHandlerFunc`、`sseEndpoint`。
 - 不修改 `sprout/parse_request.go`：`default` 标签优先于 query/header/cookie 是被 `parse_request_test.go` 明确锁定的既定绑定顺序（path > default > query > header > cookie），不是缺陷。
+- **请求上下文的架构在 `445999e` 之后变了**：框架自带的值（serializer、acceptType、deserializer、contentTypeParams、pathParams、endpointErr）不再走 `context.WithValue` 链，而是装在 `requestContext.values`（`ctxValues` 结构体）里；`ctx.Value()` 先查 `values.lookup()`，查不到再回落到 `values.parent`（请求原本携带的上下文）。因此：
+  - SSE 的流放进 `ctxValues` 的字段，**不新增上下文键**。
+  - 端点错误用既有的 `ctx.setEndpointError(err)` 记录，不再自己拼 `context.WithValue`。
+  - 旧写法 `context.WithValue(ctx, ...)` 会让 `ctx.Value()` 自引用死循环（`ctx.Request.Context()` 变回指向自身）。`445999e` 已经消除了这个写法，Task 1 改为锁定这一行为的回归护栏。
 - 注释与文档一律用英文，与 sprout 现有代码风格一致；本计划中的中文仅用于面向用户的说明。
 
 ---
 
-### Task 1: 修复请求上下文的无限递归缺陷
+### Task 1: 锁定请求上下文的取值行为（回归护栏）
 
 **Files:**
-- Modify: `sprout/endpoint.go:120-125`
-- Test: `sprout/context_test.go`（新建）
+- Create: `sprout/context_test.go`（新建）
+- 不修改 `sprout/endpoint.go`、`sprout/context.go`
 
 **Interfaces:**
-- Consumes: 无（纯缺陷修复）
-- Produces: `sprout/endpoint.go` 中端点错误写入请求上下文的写法固定为「父上下文是 `ctx.Request.Context()`」。后续 Task 4 的 SSE 实现依赖这条约定。
+- Consumes: 无（纯护栏）
+- Produces: `sprout/context_test.go` 里的 `TestContextLookupAfterEndpointError`。它守住一条后来者容易踩的坑：端点返回错误之后，再去读**别的**上下文值不会死循环。
 
 **背景：**
 
-`sprout/endpoint.go` 处理函数返回错误时这样写：
+`445999e` 之前，`sprout/endpoint.go` 这样记录端点错误：
 
 ```go
 newRequest := ctx.Request.WithContext(context.WithValue(ctx, ctxKeyEndpointError, err))
@@ -52,11 +56,11 @@ func (c *requestContext) Value(key any) any {
 
 赋值之后 `ctx.Request.Context()` 就是那个 `WithValue` 节点，于是查任何**不是** `ctxKeyEndpointError` 的 key 时，链路变成 `ctx.Value(k)` → `ctx.Request.Context().Value(k)` → `WithValue` 节点 → 父节点 `ctx` → `ctx.Value(k)` → 无限自引用。
 
-现有代码没暴露，是因为出错之后唯一一次上下文查询恰好就是刚设置的那个 key（熔断器 defer 里读 `ctxKeyEndpointError`），命中即返回，不再下钻。
+已实测复现（查另一个 key → 2 秒超时不死）。
 
-已实测复现：查另一个 key → 2 秒超时不死；把父上下文换成 `ctx.Request.Context()` 后正常返回 nil。
+`445999e` 把框架的值收进了 `ctxValues` 结构体，`setEndpointError` 直接写字段，`ctx.Value()` 查不到时回落到 `values.parent`（请求原本的上下文），这个坑已经不存在了。本任务用一条测试把这个行为锁住，免得以后有人把 `context.WithValue(ctx, ...)` 写回来。
 
-- [ ] **Step 1: 写失败测试**
+- [ ] **Step 1: 写测试**
 
 新建 `sprout/context_test.go`：
 
@@ -72,13 +76,13 @@ import (
 	"github.com/wxy365/basal/errs"
 )
 
-// TestContextLookupAfterEndpointError verifies that looking up a context value
-// other than the endpoint error, after the endpoint error has been recorded,
-// terminates instead of recursing endlessly.
+// TestContextLookupAfterEndpointError verifies that an interceptor that reads a
+// context value after the handler failed does not deadlock.
 //
-// The endpoint error is stored in the request context. The chain it is stored
-// in must not be rooted at the request context itself, because the request
-// context resolves its values by delegating to the very request it holds.
+// The endpoint error is recorded in the request context. The chain it is
+// stored in must not be rooted at the request context itself, because the
+// request context resolves its values by delegating to the very request it
+// holds.
 func TestContextLookupAfterEndpointError(t *testing.T) {
 	looked := make(chan any, 1)
 	e := &Endpoint[endpointInput, *endpointOutput]{
@@ -88,18 +92,26 @@ func TestContextLookupAfterEndpointError(t *testing.T) {
 		Handler: func(ctx *Context, in endpointInput) (*endpointOutput, error) {
 			return nil, errs.New("boom").WithStatus(http.StatusConflict)
 		},
-		ErrorHandler: func(ctx *Context, err error) {
-			go func() {
-				looked <- ctx.Value(ctxKeyAcceptType)
-			}()
-			select {
-			case v := <-looked:
-				if v != MimeJson {
-					t.Errorf("the accept type = %v, want %v", v, MimeJson)
+		Interceptors: []Interceptor{
+			func(next func(ctx *requestContext) error) func(ctx *requestContext) error {
+				return func(ctx *requestContext) error {
+					err := next(ctx)
+					// The interceptor reads a context value that is not the
+					// endpoint error, after the handler has failed.
+					go func() {
+						looked <- ctx.Value(ctxKeyAcceptType)
+					}()
+					select {
+					case v := <-looked:
+						if v != MimeJson {
+							t.Errorf("the accept type = %v, want %v", v, MimeJson)
+						}
+					case <-time.After(2 * time.Second):
+						t.Error("looking up a context value after the endpoint error deadlocked")
+					}
+					return err
 				}
-			case <-time.After(2 * time.Second):
-				t.Error("looking up a context value after the endpoint error deadlocked")
-			}
+			},
 		},
 	}
 
@@ -110,53 +122,24 @@ func TestContextLookupAfterEndpointError(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 运行测试，确认它失败**
+- [ ] **Step 2: 运行测试，确认它通过**
 
 Run: `cd sprout && env -u GOROOT go test -run TestContextLookupAfterEndpointError -v .`
 
-Expected: FAIL，报 `looking up a context value after the endpoint error deadlocked`（修复前该 goroutine 自引用死循环，2 秒后超时）。
+Expected: PASS（`445999e` 已经消除了这个隐患，这条测试把它锁住）。
 
-- [ ] **Step 3: 实施最小修复**
-
-修改 `sprout/endpoint.go` 中处理函数返回错误的那一段：
-
-```go
-		out, err := e.Handler(ctx, in)
-		if err != nil {
-			if svr.Debug {
-				log.ErrorErrF(`Endpoint [{0}] failed to process the request`, err, r.name)
-			}
-			// The parent of the stored value must be the request context rather
-			// than ctx itself: the request context resolves its values by
-			// delegating to the request it holds, so a chain rooted at ctx
-			// would point back at itself and looking up any other key would
-			// recurse endlessly.
-			newRequest := ctx.Request.WithContext(context.WithValue(ctx.Request.Context(), ctxKeyEndpointError, err))
-			*ctx.Request = *newRequest
-			return err
-		}
-```
-
-只改 `context.WithValue(ctx, ...)` 里的父上下文，`*ctx.Request = *newRequest` 的原地修改风格保持不变。
-
-- [ ] **Step 4: 运行测试，确认它通过**
-
-Run: `cd sprout && env -u GOROOT go test -run TestContextLookupAfterEndpointError -v .`
-
-Expected: PASS。
-
-- [ ] **Step 5: 跑全量测试，确认没有回归**
+- [ ] **Step 3: 跑全量测试，确认没有回归**
 
 Run: `cd sprout && env -u GOROOT go test ./...`
 
 Expected: 全部 PASS。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 4: 提交**
 
 ```bash
 cd sprout
-git add endpoint.go context_test.go
-git commit -m "fix(context): avoid the self-referencing context chain that deadlocks value lookups"
+git add context_test.go
+git commit -m "test(context): guard the lookup of the values after the endpoint error"
 ```
 
 ---
@@ -904,15 +887,18 @@ git commit -m "feat(sse): add the SSE stream that writes and flushes the events"
 
 **Files:**
 - Modify: `sprout/sse.go`（追加到文件末尾）
+- Modify: `sprout/context.go`（`ctxValues` 加一个字段，加两个访问方法）
 - Test: `sprout/sse_test.go`（追加）
 
 **Interfaces:**
-- Consumes: Task 3 的 `newSSEStream`、`sseStream`、`errSSEClosed`；既有的 `parseHttpRequest`、`svr.buildInputEntityValidateFuncs`、`appendServerInterceptors`、`refinedEndpoint`
+- Consumes: Task 3 的 `newSSEStream`、`sseStream`、`errSSEClosed`；既有的 `parseHttpRequest`、`svr.buildInputEntityValidateFuncs`、`appendServerInterceptors`、`refinedEndpoint`、`requestContext.setEndpointError`
 - Produces:
   - `type sseHandlerFunc[I any] func(ctx *requestContext, in I, stream *sseStream) error`
   - `type sseEndpoint[I any] struct { Name string; Pattern string; Methods []string; Handler sseHandlerFunc[I]; Interceptors []interceptorFunc; ErrorHandler errorHandlerFunc; KeepAlive time.Duration }`
   - `func (e *sseEndpoint[I]) appendToServer(svr *httpServer, decrypters map[string]func(cipher []byte) ([]byte, error))`
-  - `var ctxKeySSEStream`（上下文键，类型 `ctxKeyTypeSSEStream`）
+  - `ctxValues.sseStream *sseStream` 字段（`sprout/context.go`）
+  - `func (c *requestContext) setSSEStream(stream *sseStream)`
+  - `func (c *requestContext) sseStreamOf() *sseStream`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1113,12 +1099,6 @@ Expected: FAIL，编译错误 `undefined: sseEndpoint`。
 追加到 `sprout/sse.go`：
 
 ```go
-// ctxKeyTypeSSEStream is the type of the context key that carries the stream
-// of the SSE endpoint that is being served.
-type ctxKeyTypeSSEStream struct{}
-
-var ctxKeySSEStream ctxKeyTypeSSEStream
-
 // sseHandlerFunc is the signature of the business logic of an SSE endpoint.
 // It writes the events to the stream synchronously and ends the connection
 // when it returns.
@@ -1208,19 +1188,15 @@ func (e *sseEndpoint[I]) appendToServer(svr *httpServer, decrypters map[string]f
 		}
 
 		stream := newSSEStream(ctx, e.KeepAlive)
-		// The stream is stored in the request context, so that the error
-		// handler can tell whether the response has already been committed.
-		// The parent of the stored value is the request context rather than
-		// ctx itself, otherwise a lookup would point back at itself.
-		newRequest := ctx.Request.WithContext(context.WithValue(ctx.Request.Context(), ctxKeySSEStream, stream))
-		*ctx.Request = *newRequest
+		// The stream is recorded in the values of the request, so that the
+		// error handler can tell whether the response has been committed.
+		ctx.setSSEStream(stream)
 
 		handlerErr := callSSEHandler(e.Handler, ctx, in, stream)
 		if handlerErr != nil {
-			// The error is recorded in the request context, so that the circuit
-			// breaker can tell that the request failed.
-			newRequest := ctx.Request.WithContext(context.WithValue(ctx.Request.Context(), ctxKeyEndpointError, handlerErr))
-			*ctx.Request = *newRequest
+			// The error is recorded in the values of the request, so that the
+			// circuit breaker can tell that the request failed.
+			ctx.setEndpointError(handlerErr)
 			if stream.isCommitted() {
 				// The response has been committed, so the status code can no
 				// longer be changed and the error is reported as an event.
@@ -1248,7 +1224,7 @@ func (e *sseEndpoint[I]) appendToServer(svr *httpServer, decrypters map[string]f
 	r.httpHandler = func(ctx *requestContext) error {
 		err := httpHandler(ctx)
 		if err != nil {
-			if stream, ok := ctx.Value(ctxKeySSEStream).(*sseStream); ok && stream.isCommitted() {
+			if stream := ctx.sseStreamOf(); stream != nil && stream.isCommitted() {
 				// The response has been committed, so the error is reported as
 				// an event instead of a status code.
 				stream.sendError(err)
@@ -1296,6 +1272,34 @@ import (
 	bjson "github.com/wxy365/basal/json"
 	"github.com/wxy365/basal/log"
 )
+```
+
+同时修改 `sprout/context.go`。框架自带的值都装在 `ctxValues` 里，SSE 的流也放进去，跟 `endpointErr` 一个层级：
+
+在 `ctxValues` 结构体里，`endpointErr` 字段之后加上：
+
+```go
+	// sseStream is the stream of the SSE endpoint that is serving the
+	// request. It is nil for the requests that are not served by an SSE
+	// endpoint.
+	sseStream *sseStream
+```
+
+在 `setEndpointError` 方法之后加上：
+
+```go
+// setSSEStream records the stream of the SSE endpoint that is serving the
+// request, so that the error handler can tell whether the response has already
+// been committed.
+func (c *requestContext) setSSEStream(stream *sseStream) {
+	c.values.sseStream = stream
+}
+
+// sseStreamOf returns the stream of the SSE endpoint that is serving the
+// request, or nil when the request is not served by an SSE endpoint.
+func (c *requestContext) sseStreamOf() *sseStream {
+	return c.values.sseStream
+}
 ```
 
 - [ ] **Step 4: 运行测试，确认它通过**
@@ -1714,7 +1718,55 @@ Expected: `git status` 里只剩下 untracked 的 `docs/`（对方的 gRPC 设�
 
 - [ ] `sprout/api.go` 里没有出现 `Runner`、`Component`、`Lifecycle` 标识符。
 - [ ] `sprout/parse_request.go` 没有被修改（既定绑定顺序保持不变）。
-- [ ] `sprout/sse.go` 里两处上下文写入的父上下文都是 `ctx.Request.Context()`，不是 `ctx`。
+- [ ] `sprout/sse.go` 里没有自行拼 `context.WithValue`；流用 `ctx.setSSEStream` 登记，端点错误用既有的 `ctx.setEndpointError` 记录。
 - [ ] SSE 端点的响应头是懒提交的：第一帧之前发生的错误仍然返回正确的 HTTP 状态码。
 - [ ] 流已提交后的错误降级为 `event: error` 帧，JSON 不会混进 SSE 流。
 - [ ] `sprout/sse.go` 的导出名字只有 `SSEEvent`、`SSEStream`、`SSEHandler`、`SSEEndpoint`，加上 `api.go` 的 `MountSSE` 与 `MimeEventStream`。
+
+---
+
+## 附录二：执行过程中的偏差与发现
+
+计划写在开工之前，执行时上游代码变了，以下几处与计划原文不同。实际落地的代码以本节为准。
+
+### 1. Task 1 从「修缺陷」变成「回归护栏」
+
+计划写的是修 `endpoint.go` 里 `context.WithValue(ctx, ...)` 造成的上下文自引用死循环。执行时发现上游提交 `445999e`（perf: cut the allocations of the hot paths）已经把框架自带的值收进 `ctxValues` 结构体，`setEndpointError` 直接写字段，死循环的隐患不存在了。
+
+于是 Task 1 改成一条回归测试：用一个拦截器在 handler 返回错误之后读一个**别的**上下文值，断言它不会卡住。这条测试守住的是「不要再把 `context.WithValue(ctx, ...)` 写回来」。
+
+### 2. SSE 的流登记进 `ctxValues`，不新增上下文键
+
+同样因为 `445999e`，`ctxValues` 成了框架自带值的唯一容身之处。所以：
+
+- `ctxValues` 新增 `sseStream *sseStream` 字段；
+- `requestContext` 新增 `setSSEStream` 与 `sseStreamOf` 两个方法；
+- **不**新增 `ctxKeyTypeSSEStream` 上下文键。
+
+端点错误也改用既有的 `ctx.setEndpointError(err)`，不再自己拼 `context.WithValue`。
+
+### 3. 心跳测试需要线程安全的 writer
+
+`httptest.ResponseRecorder` 不是并发安全的：心跳 goroutine 在写它，测试同时在读 `Body.String()`，`go test -race` 会报竞态。实现本身没问题（写操作由 `s.mu` 串行化），是测试的问题。
+
+测试改用一个带锁的 `syncWriter`。同理，`Close()` 之后不再有写发生，所以「先 Close 再读 body」也是安全的。
+
+### 4. mimo 不是 git 仓库，且 iface 包必须在 main.go 里被引用
+
+- 工作区里只有 `basal`、`sprout`、`wql` 是 git 仓库，`mimo` **不是**。Task 6 的提交步骤不适用，mimo 的改动直接落在工作区。
+- Go 的 `init()` 只在包被 import 时执行。`mimo/iface/sse` 必须在 `mimo/main.go` 里以空导入 `_ "mimo/iface/sse"` 引用，否则端点不会被注册（表现为 404）。计划原文漏了这一步。
+
+### 5. 脱离工作区的独立构建失败：是既有问题，不是本次引入
+
+Task 7 的 Step 3 用 `git archive` 导出到工作区外构建，会失败：
+
+```
+endpoint.go:10:2: no required module provides package github.com/wxy365/basal/json
+```
+
+原因：`sprout/endpoint.go` 早在 `7721701` 就 import 了 `github.com/wxy365/basal/json`，而 `go.mod` 钉的 `basal v0.0.0-20260511062053-f93603e08d1b` 里没有 `json` 包——该包在 basal 仓库的 `125dde9` 才加入，且**尚未推送到远端**（`origin/main` 还在 `131fc45`）。
+
+在 `445999e`（本次开工前的基线）上独立构建，报同样的错，所以与 SSE 无关。工作区内的 `go.work` 用的是本地 basal，所以一切正常。
+
+要修需要两件事：把 basal 的 `json` 提交推上远端，再把 sprout 的 `go.mod` 里的 basal 版本升到包含它的版本。这动的是共享的依赖状态，且 gRPC 会话同期也在改 `sprout/go.mod`，因此本次不擅自动手，留给仓库作者决定。
+
