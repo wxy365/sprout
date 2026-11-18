@@ -52,7 +52,7 @@ type Method interface {
 	goTypes() (reflect.Type, reflect.Type)
 	// buildHandler 生成该方法的 grpc 处理器描述。
 	// 一元方法返回 grpc.MethodDesc，流方法返回 grpc.StreamDesc。
-	buildHandler(inDesc, outDesc protoreflect.MessageDescriptor, validateFunc sp.ObjectValidateFunc) (grpc.MethodDesc, grpc.StreamDesc, error)
+	buildHandler(fullMethod string, inDesc, outDesc protoreflect.MessageDescriptor, validateFunc sp.ObjectValidateFunc) (grpc.MethodDesc, grpc.StreamDesc, error)
 }
 
 // Service 描述一个 gRPC 服务及其方法。
@@ -88,7 +88,8 @@ func (m *unaryMethod[I, O]) goTypes() (reflect.Type, reflect.Type) {
 	return reflect.TypeOf((*I)(nil)).Elem(), reflect.TypeOf((*O)(nil)).Elem()
 }
 
-func (m *unaryMethod[I, O]) buildHandler(inDesc, outDesc protoreflect.MessageDescriptor, validateFunc sp.ObjectValidateFunc) (grpc.MethodDesc, grpc.StreamDesc, error) {
+func (m *unaryMethod[I, O]) buildHandler(fullMethod string, inDesc, outDesc protoreflect.MessageDescriptor, validateFunc sp.ObjectValidateFunc) (grpc.MethodDesc, grpc.StreamDesc, error) {
+	inType := reflect.TypeOf((*I)(nil)).Elem()
 	return grpc.MethodDesc{
 		MethodName: m.name,
 		Handler: func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
@@ -96,25 +97,36 @@ func (m *unaryMethod[I, O]) buildHandler(inDesc, outDesc protoreflect.MessageDes
 			if err := dec(inMsg); err != nil {
 				return nil, err
 			}
-			in := reflect.New(reflect.TypeOf((*I)(nil)).Elem())
+			in := reflect.New(inType)
 			if err := fromMessage(inMsg, in.Elem()); err != nil {
 				return nil, status.Error(codes.Internal, err.Error())
 			}
-			if validateFunc != nil {
-				if err := validateFunc(ctx, in.Elem()); err != nil {
+			callCtx := &Context{Context: ctx, md: metadataFromIncoming(ctx)}
+			invoke := func(ctx context.Context, req any) (any, error) {
+				reqIn, ok := req.(*I)
+				if !ok {
+					reqIn = in.Interface().(*I)
+				}
+				if validateFunc != nil {
+					if err := validateFunc(ctx, reflect.ValueOf(reqIn).Elem()); err != nil {
+						return nil, toStatus(err)
+					}
+				}
+				res, err := m.handler(callCtx, reqIn)
+				if err != nil {
 					return nil, toStatus(err)
 				}
+				outMsg := newDynamicMessage(outDesc)
+				if err := toMessage(reflect.ValueOf(res).Elem(), outMsg); err != nil {
+					return nil, status.Error(codes.Internal, err.Error())
+				}
+				return outMsg, nil
 			}
-			callCtx := &Context{Context: ctx, md: metadataFromIncoming(ctx)}
-			res, err := m.handler(callCtx, in.Interface().(*I))
-			if err != nil {
-				return nil, toStatus(err)
+			if interceptor == nil {
+				return invoke(ctx, in.Interface())
 			}
-			outMsg := newDynamicMessage(outDesc)
-			if err := toMessage(reflect.ValueOf(res).Elem(), outMsg); err != nil {
-				return nil, status.Error(codes.Internal, err.Error())
-			}
-			return outMsg, nil
+			info := &grpc.UnaryServerInfo{Server: srv, FullMethod: fullMethod}
+			return interceptor(ctx, in.Interface(), info, invoke)
 		},
 	}, grpc.StreamDesc{}, nil
 }
@@ -177,7 +189,8 @@ func (s *Service) buildServiceDesc() (*grpc.ServiceDesc, error) {
 			return nil, fmt.Errorf("the service %s: the message descriptors are not found", s.Name)
 		}
 		validateFunc := sp.BuildInputEntityValidateFuncs(sp.DefaultValidators(), inType)
-		unaryDesc, streamDesc, err := m.buildHandler(inDesc, outDesc, validateFunc)
+		fullMethod := "/" + s.Name + "/" + m.methodName()
+		unaryDesc, streamDesc, err := m.buildHandler(fullMethod, inDesc, outDesc, validateFunc)
 		if err != nil {
 			return nil, fmt.Errorf("the service %s: the method %s: %w", s.Name, m.methodName(), err)
 		}

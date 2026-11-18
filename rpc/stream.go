@@ -123,7 +123,7 @@ func (m *streamMethod[I, O]) goTypes() (reflect.Type, reflect.Type) {
 	return reflect.TypeOf((*I)(nil)).Elem(), reflect.TypeOf((*O)(nil)).Elem()
 }
 
-func (m *streamMethod[I, O]) buildHandler(inDesc, outDesc protoreflect.MessageDescriptor, validateFunc sp.ObjectValidateFunc) (grpc.MethodDesc, grpc.StreamDesc, error) {
+func (m *streamMethod[I, O]) buildHandler(fullMethod string, inDesc, outDesc protoreflect.MessageDescriptor, validateFunc sp.ObjectValidateFunc) (grpc.MethodDesc, grpc.StreamDesc, error) {
 	return grpc.MethodDesc{}, grpc.StreamDesc{
 		StreamName: m.name,
 		Handler: func(srv any, stream grpc.ServerStream) error {
