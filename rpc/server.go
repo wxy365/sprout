@@ -41,6 +41,8 @@ type Server struct {
 	services []*Service
 	// server 是底层的 grpc 服务端。
 	server *grpc.Server
+	// addr 是服务端实际监听的地址。
+	addr string
 }
 
 // serverCfg 是 app.grpc_servers 配置项。
@@ -160,6 +162,9 @@ func (s *Server) serve(lis net.Listener) {
 
 // Start 启动该服务端并阻塞，直到服务端停止。
 func (s *Server) Start() error {
+	// 配置可能在服务端实例创建之后才被加载，因此这里再读一次配置。
+	s.applyConfig()
+
 	gs, err := s.buildGrpcServer()
 	if err != nil {
 		return err
@@ -172,6 +177,9 @@ func (s *Server) Start() error {
 	if err != nil {
 		return errs.Wrap(err, "Cannot listen on the port [{0}] of the gRPC server [{1}]", s.Port, s.Name)
 	}
+	s.mu.Lock()
+	s.addr = lis.Addr().String()
+	s.mu.Unlock()
 	if addr, ok := lis.Addr().(*net.TCPAddr); ok {
 		s.mu.Lock()
 		s.Port = uint16(addr.Port)
@@ -192,6 +200,13 @@ func (s *Server) Start() error {
 		return err
 	}
 	return nil
+}
+
+// Addr 返回服务端实际监听的地址。服务端尚未启动时返回空字符串。
+func (s *Server) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.addr
 }
 
 // Stop 优雅停止该服务端。超过优雅停止的等待时长则强制停止。
