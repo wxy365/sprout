@@ -1,6 +1,7 @@
 package sprout
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,11 +35,28 @@ type app[C any] struct {
 	Initializers []appInitializer[C]
 	// Servers is the list of HTTP servers managed by this application.
 	Servers []*httpServer
+	// Runners is the list of the components that are started together with this
+	// application, such as the gRPC servers. Their Start method blocks until
+	// the component stops, so all of them but the first one run in the
+	// background.
+	Runners []runner
 	// Context is the shared application context, typically a pointer to a struct
 	// that holds application-wide dependencies such as configs and service references.
 	Context C
 
 	once sync.Once
+}
+
+// runner is a component that is started and stopped together with the
+// application.
+//
+// The exported alias Runner is declared in api.go, which collects the public
+// API surface of the package.
+type runner interface {
+	// Start blocks until the component stops.
+	Start() error
+	// Stop shuts the component down gracefully.
+	Stop(ctx context.Context) error
 }
 
 func (a *app[C]) Run() {
@@ -52,14 +70,28 @@ func (a *app[C]) Run() {
     /_/
 `)
 		a.init()
-		for i := len(a.Servers); i > 0; i-- {
-			server := a.Servers[i-1]
+		starts := make([]func() error, 0, len(a.Servers)+len(a.Runners))
+		for _, server := range a.Servers {
+			starts = append(starts, func() error {
+				server.start()
+				return nil
+			})
+		}
+		for _, r := range a.Runners {
+			starts = append(starts, r.Start)
+		}
+		for i := len(starts); i > 0; i-- {
+			start := starts[i-1]
 			if i > 1 {
 				go func() {
-					server.start()
+					if err := start(); err != nil {
+						log.ErrorErr(err)
+					}
 				}()
 			} else {
-				server.start()
+				if err := start(); err != nil {
+					log.ErrorErr(err)
+				}
 			}
 		}
 	})

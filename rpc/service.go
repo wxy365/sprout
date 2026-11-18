@@ -152,7 +152,12 @@ func (s *Service) buildServiceDesc() (*grpc.ServiceDesc, error) {
 		return nil, fmt.Errorf("the service %s has no method", s.Name)
 	}
 	seen := map[string]bool{}
-	desc := &grpc.ServiceDesc{ServiceName: s.Name}
+	desc := &grpc.ServiceDesc{
+		ServiceName: s.Name,
+		// 动态服务没有公共的接口类型可供声明，这里用 any 占位。
+		// grpc-go 只用它做一次 Implements 检查，服务名取自 ServiceName。
+		HandlerType: (*any)(nil),
+	}
 	for _, m := range s.Methods {
 		if m.methodName() == "" {
 			return nil, fmt.Errorf("the service %s has a method without a name", s.Name)

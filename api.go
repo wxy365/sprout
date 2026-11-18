@@ -164,6 +164,11 @@ type (
 	//
 	// See interceptor.go for the implementation.
 	RateLimiterGuard = rateLimiterGuard
+	// Runner is a component that is started and stopped together with the
+	// application, such as a gRPC server.
+	//
+	// See app.go for the implementation.
+	Runner = runner
 )
 
 const (
