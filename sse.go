@@ -2,11 +2,17 @@ package sprout
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/wxy365/basal/errs"
 	bjson "github.com/wxy365/basal/json"
+	"github.com/wxy365/basal/log"
 )
 
 // mimeEventStream is the MIME type for server-sent events.
@@ -97,4 +103,231 @@ func sanitizeSSEField(value string) string {
 		return value
 	}
 	return strings.NewReplacer("\r", "", "\n", "").Replace(value)
+}
+
+// errSSEClosed is returned when an event is written to a stream that has
+// already ended.
+var errSSEClosed = errors.New("The SSE stream has been closed")
+
+// sseStream writes server-sent events to an HTTP response.
+//
+// The framework creates the stream before it calls the business logic and
+// hands it over as the third argument of the handler. The writes are
+// serialized by a mutex, so the keep alive goroutine and the handler may call
+// Send at the same time.
+//
+// The exported alias SSEStream is declared in api.go, which collects the
+// public API surface of the package.
+type sseStream struct {
+	writer     http.ResponseWriter
+	controller *http.ResponseController
+	// requestCtx is the context of the request that opened the stream. It is
+	// cancelled when the client disconnects.
+	requestCtx context.Context
+	// protoMajor is the major version of the HTTP protocol of the request.
+	// Only HTTP/1.1 may carry the Connection header.
+	protoMajor int
+
+	mu        sync.Mutex
+	committed bool
+	closed    bool
+	err       error
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// newSSEStream builds a stream that writes into the response of the given
+// request. A keep alive interval greater than zero starts the goroutine that
+// keeps the connection alive.
+func newSSEStream(ctx *requestContext, keepAlive time.Duration) *sseStream {
+	s := &sseStream{
+		writer:     ctx.Writer,
+		controller: http.NewResponseController(ctx.Writer),
+		requestCtx: ctx.Request.Context(),
+		protoMajor: ctx.Request.ProtoMajor,
+		done:       make(chan struct{}),
+	}
+	// The write timeout of the server cuts a long connection short, so it is
+	// cleared here. The writers of HTTP/1.1, HTTP/2 and HTTP/3 all support
+	// it.
+	if err := s.controller.SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		log.WarnErrF("Failed to clear the write deadline of the SSE stream", err)
+	}
+	go s.watchDisconnect()
+	if keepAlive > 0 {
+		go s.keepAlive(keepAlive)
+	}
+	return s
+}
+
+// Send writes an event to the stream. The response is committed on the first
+// write.
+func (s *sseStream) Send(ev sseEvent) error {
+	frame, err := ev.encode()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errSSEClosed
+	}
+	s.commitLocked()
+	if _, err := s.writer.Write(frame); err != nil {
+		s.failLocked(err)
+		return err
+	}
+	if err := s.controller.Flush(); err != nil {
+		s.failLocked(err)
+		return err
+	}
+	return nil
+}
+
+// SendData writes an event that carries nothing but a payload.
+func (s *sseStream) SendData(data any) error {
+	return s.Send(sseEvent{Data: data})
+}
+
+// SendEvent writes a named event.
+func (s *sseStream) SendEvent(name string, data any) error {
+	return s.Send(sseEvent{Event: name, Data: data})
+}
+
+// Comment writes a comment line. A comment is invisible to the browser, so it
+// only keeps the connection alive.
+func (s *sseStream) Comment(text string) error {
+	line := ": " + sanitizeSSEField(text) + "\n\n"
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errSSEClosed
+	}
+	s.commitLocked()
+	if _, err := s.writer.Write([]byte(line)); err != nil {
+		s.failLocked(err)
+		return err
+	}
+	if err := s.controller.Flush(); err != nil {
+		s.failLocked(err)
+		return err
+	}
+	return nil
+}
+
+// Close ends the stream. A stream that has not written anything yet is
+// committed on the way out, so that the client receives a well formed but
+// empty response.
+func (s *sseStream) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.commitLocked()
+	s.closed = true
+	s.closeOnce.Do(func() { close(s.done) })
+	return nil
+}
+
+// Done is closed when the client disconnects, when a write fails or when the
+// stream is closed. The handler should watch it to leave its loop in time.
+func (s *sseStream) Done() <-chan struct{} {
+	return s.done
+}
+
+// Err reports why the stream ended: the error of the request context when the
+// client disconnected, the underlying I/O error when a write failed, and nil
+// when the stream was closed on purpose.
+func (s *sseStream) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
+}
+
+// isCommitted reports whether the response has been committed. Once it is,
+// the status code can no longer be changed, so an error can only be reported
+// as an event.
+func (s *sseStream) isCommitted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.committed
+}
+
+// sendError reports an error as an error event. It is only useful once the
+// response has been committed.
+func (s *sseStream) sendError(err error) error {
+	payload := map[string]any{"message": err.Error()}
+	var e *errs.Err
+	if errors.As(err, &e) {
+		if len(e.Code) > 0 {
+			payload["code"] = e.Code
+		}
+		if len(e.Message) > 0 {
+			payload["message"] = e.Message
+		}
+		if e.Status > 0 {
+			payload["status"] = e.Status
+		}
+	}
+	return s.Send(sseEvent{Event: "error", Data: payload})
+}
+
+// commitLocked writes the headers of the SSE response. The response is
+// committed lazily: the headers go out only when a frame is really written, so
+// that an error that happens before that still gets the right status code.
+// The caller must hold s.mu.
+func (s *sseStream) commitLocked() {
+	if s.committed {
+		return
+	}
+	header := s.writer.Header()
+	header.Set("Content-Type", mimeEventStream)
+	header.Set("Cache-Control", "no-cache")
+	header.Set("X-Accel-Buffering", "no")
+	if s.protoMajor == 1 {
+		// HTTP/2 and HTTP/3 do not allow the connection specific headers.
+		header.Set("Connection", "keep-alive")
+	}
+	s.writer.WriteHeader(http.StatusOK)
+	s.committed = true
+}
+
+// failLocked ends the stream with the given error. The caller must hold s.mu.
+func (s *sseStream) failLocked(err error) {
+	if s.closed {
+		return
+	}
+	s.closed = true
+	if err != nil && s.err == nil {
+		s.err = err
+	}
+	s.closeOnce.Do(func() { close(s.done) })
+}
+
+// watchDisconnect waits for the client to disconnect. The request context is
+// cancelled when the client goes away and when the handler returns, so this
+// goroutine always ends.
+func (s *sseStream) watchDisconnect() {
+	<-s.requestCtx.Done()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failLocked(s.requestCtx.Err())
+}
+
+// keepAlive writes a comment line at the given interval, so that the proxies
+// in between do not drop an idle connection.
+func (s *sseStream) keepAlive(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := s.Comment("ping"); err != nil {
+				return
+			}
+		case <-s.done:
+			return
+		}
+	}
 }
