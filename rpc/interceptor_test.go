@@ -13,20 +13,20 @@ func TestTheServerRecoversThePanic(t *testing.T) {
 	svc := &Service{
 		Name: "demo.Greeter",
 		Methods: []Method{
-			Unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
+			unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
 				panic("boom")
 			}),
 		},
 	}
 	addr := startTestServer(t, svc)
 
-	client, err := NewClient("demo.Greeter", WithDirect(addr))
+	client, err := newClient("demo.Greeter", withDirect(addr))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
 
-	hello := Doer[svcHelloReq, svcHelloResp](client, "Hello")
+	hello := doer[svcHelloReq, svcHelloResp](client, "Hello")
 	_, err = hello(context.Background(), &svcHelloReq{Name: "wxy"})
 	if err == nil {
 		t.Fatalf("the panic should be converted into an error")
@@ -45,20 +45,20 @@ func TestTheServerRecoversThePanicOfTheStream(t *testing.T) {
 	svc := &Service{
 		Name: "demo.Chat",
 		Methods: []Method{
-			Stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
+			stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
 				panic("boom")
 			}),
 		},
 	}
 	addr := startTestServer(t, svc)
 
-	client, err := NewClient("demo.Chat", WithDirect(addr))
+	client, err := newClient("demo.Chat", withDirect(addr))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
 
-	chat := StreamDoer[streamChatReq, streamChatResp](client, "Chat")
+	chat := streamDoer[streamChatReq, streamChatResp](client, "Chat")
 	stream, err := chat(context.Background())
 	if err != nil {
 		t.Fatalf("open the stream: %v", err)
@@ -83,13 +83,13 @@ func TestTheServerRejectsTheRateLimitedCall(t *testing.T) {
 	svc := helloService()
 	addr := startTestServer(t, svc)
 
-	client, err := NewClient("demo.Greeter", WithDirect(addr))
+	client, err := newClient("demo.Greeter", withDirect(addr))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
 
-	hello := Doer[svcHelloReq, svcHelloResp](client, "Hello")
+	hello := doer[svcHelloReq, svcHelloResp](client, "Hello")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// The default limiter allows 500 calls per second, so a burst of calls

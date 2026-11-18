@@ -16,8 +16,7 @@ import (
 
 // Client 是一个 gRPC 客户端。它持有一个到目标服务的连接。
 //
-// The exported alias Client is declared in api.go, which collects the public
-// API surface of the package.
+// See client.go for the implementation.
 type Client struct {
 	// service 是目标服务的全限定名。
 	service string
@@ -35,6 +34,8 @@ type clientOptions struct {
 	direct string
 	// registry 是服务注册中心，优先于直连地址。
 	registry Registry
+	// nacos 是 Nacos 注册中心的配置。
+	nacos *NacosConfig
 	// registryService 是注册中心侧的服务名，默认与 gRPC 服务名相同。
 	registryService string
 	// balancer 是负载均衡策略。
@@ -53,15 +54,14 @@ type clientOptions struct {
 
 // ClientOption 配置客户端。选项按给出的顺序应用。
 //
-// The exported alias ClientOption is declared in api.go, which collects the
-// public API surface of the package.
+// See client.go for the implementation.
 type ClientOption func(*clientOptions)
 
 // WithDirect 让客户端直连给定的地址。
 //
 // The exported wrapper WithDirect is declared in api.go, which collects the
 // public API surface of the package.
-func WithDirect(addr string) ClientOption {
+func withDirect(addr string) ClientOption {
 	return func(o *clientOptions) {
 		o.direct = addr
 	}
@@ -71,7 +71,7 @@ func WithDirect(addr string) ClientOption {
 //
 // The exported wrapper WithBalancer is declared in api.go, which collects the
 // public API surface of the package.
-func WithBalancer(name string) ClientOption {
+func withBalancer(name string) ClientOption {
 	return func(o *clientOptions) {
 		o.balancer = name
 	}
@@ -81,7 +81,7 @@ func WithBalancer(name string) ClientOption {
 //
 // The exported wrapper WithTimeout is declared in api.go, which collects the
 // public API surface of the package.
-func WithTimeout(d time.Duration) ClientOption {
+func withTimeout(d time.Duration) ClientOption {
 	return func(o *clientOptions) {
 		o.timeout = d
 	}
@@ -91,7 +91,7 @@ func WithTimeout(d time.Duration) ClientOption {
 //
 // The exported wrapper WithTLS is declared in api.go, which collects the
 // public API surface of the package.
-func WithTLS(cfg *tls.Config) ClientOption {
+func withTLS(cfg *tls.Config) ClientOption {
 	return func(o *clientOptions) {
 		o.tlsConfig = cfg
 	}
@@ -101,7 +101,7 @@ func WithTLS(cfg *tls.Config) ClientOption {
 //
 // The exported wrapper WithMetadata is declared in api.go, which collects the
 // public API surface of the package.
-func WithMetadata(md map[string][]string) ClientOption {
+func withMetadata(md map[string][]string) ClientOption {
 	return func(o *clientOptions) {
 		o.metadata = md
 	}
@@ -111,7 +111,7 @@ func WithMetadata(md map[string][]string) ClientOption {
 //
 // The exported wrapper WithUnaryInterceptor is declared in api.go, which
 // collects the public API surface of the package.
-func WithUnaryInterceptor(i grpc.UnaryClientInterceptor) ClientOption {
+func withUnaryInterceptor(i grpc.UnaryClientInterceptor) ClientOption {
 	return func(o *clientOptions) {
 		o.unaryInterceptor = i
 	}
@@ -121,7 +121,7 @@ func WithUnaryInterceptor(i grpc.UnaryClientInterceptor) ClientOption {
 //
 // The exported wrapper WithStreamInterceptor is declared in api.go, which
 // collects the public API surface of the package.
-func WithStreamInterceptor(i grpc.StreamClientInterceptor) ClientOption {
+func withStreamInterceptor(i grpc.StreamClientInterceptor) ClientOption {
 	return func(o *clientOptions) {
 		o.streamInterceptor = i
 	}
@@ -144,7 +144,7 @@ func newClientOptions(opts ...ClientOption) *clientOptions {
 //
 // The exported wrapper NewClient is declared in api.go, which collects the
 // public API surface of the package.
-func NewClient(service string, opts ...ClientOption) (*Client, error) {
+func newClient(service string, opts ...ClientOption) (*Client, error) {
 	o := newClientOptions(opts...)
 	dialOpts := []grpc.DialOption{
 		grpc.WithDefaultServiceConfig(fmt.Sprintf(`{"loadBalancingConfig":[{"%s":{}}]}`, o.balancer)),
@@ -159,6 +159,14 @@ func NewClient(service string, opts ...ClientOption) (*Client, error) {
 	}
 	if o.streamInterceptor != nil {
 		dialOpts = append(dialOpts, grpc.WithStreamInterceptor(o.streamInterceptor))
+	}
+
+	if o.nacos != nil {
+		reg, err := newNacosRegistry(*o.nacos)
+		if err != nil {
+			return nil, err
+		}
+		o.registry = reg
 	}
 
 	var target string
@@ -190,8 +198,7 @@ func NewClient(service string, opts ...ClientOption) (*Client, error) {
 
 // Close 关闭连接。
 //
-// The exported wrapper Close is declared in api.go, which collects the public
-// API surface of the package.
+// See client.go for the implementation.
 func (c *Client) Close() error {
 	return c.conn.Close()
 }
@@ -232,7 +239,7 @@ func (c *Client) callContext(ctx context.Context) (context.Context, context.Canc
 //
 // The exported wrapper Doer is declared in api.go, which collects the public
 // API surface of the package.
-func Doer[I, O any](c *Client, method string) func(ctx context.Context, in *I) (*O, error) {
+func doer[I, O any](c *Client, method string) func(ctx context.Context, in *I) (*O, error) {
 	return func(ctx context.Context, in *I) (*O, error) {
 		inType := reflect.TypeOf((*I)(nil)).Elem()
 		outType := reflect.TypeOf((*O)(nil)).Elem()
@@ -264,7 +271,7 @@ func Doer[I, O any](c *Client, method string) func(ctx context.Context, in *I) (
 //
 // The exported wrapper StreamDoer is declared in api.go, which collects the
 // public API surface of the package.
-func StreamDoer[I, O any](c *Client, method string) func(ctx context.Context) (*ClientStream[I, O], error) {
+func streamDoer[I, O any](c *Client, method string) func(ctx context.Context) (*ClientStream[I, O], error) {
 	return func(ctx context.Context) (*ClientStream[I, O], error) {
 		inType := reflect.TypeOf((*I)(nil)).Elem()
 		outType := reflect.TypeOf((*O)(nil)).Elem()

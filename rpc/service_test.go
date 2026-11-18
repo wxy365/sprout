@@ -21,7 +21,7 @@ func TestServiceBuildsTheServiceDesc(t *testing.T) {
 	svc := &Service{
 		Name: "demo.Greeter",
 		Methods: []Method{
-			Unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
+			unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
 				return &svcHelloResp{Greeting: "hello " + in.Name}, nil
 			}),
 		},
@@ -54,10 +54,10 @@ func TestServiceRejectsAnInvalidDefinition(t *testing.T) {
 		{"with a duplicated method", &Service{
 			Name: "demo.Greeter",
 			Methods: []Method{
-				Unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
+				unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
 					return &svcHelloResp{}, nil
 				}),
-				Unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
+				unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
 					return &svcHelloResp{}, nil
 				}),
 			},
@@ -65,7 +65,7 @@ func TestServiceRejectsAnInvalidDefinition(t *testing.T) {
 		{"with an invalid message", &Service{
 			Name: "demo.Greeter",
 			Methods: []Method{
-				Unary("Hello", func(ctx *Context, in *struct {
+				unary("Hello", func(ctx *Context, in *struct {
 					Name string
 				}) (*svcHelloResp, error) {
 					return &svcHelloResp{}, nil

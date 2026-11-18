@@ -25,7 +25,7 @@ func chatService() *Service {
 	return &Service{
 		Name: "demo.Chat",
 		Methods: []Method{
-			Stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
+			stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
 				for {
 					in, err := s.Recv()
 					if err == io.EOF {
@@ -46,13 +46,13 @@ func chatService() *Service {
 func TestBidirectionalStream(t *testing.T) {
 	addr := startTestServer(t, chatService())
 
-	client, err := NewClient("demo.Chat", WithDirect(addr))
+	client, err := newClient("demo.Chat", withDirect(addr))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
 
-	chat := StreamDoer[streamChatReq, streamChatResp](client, "Chat")
+	chat := streamDoer[streamChatReq, streamChatResp](client, "Chat")
 	stream, err := chat(context.Background())
 	if err != nil {
 		t.Fatalf("open the stream: %v", err)
@@ -81,20 +81,20 @@ func TestStreamReportsTheServerError(t *testing.T) {
 	svc := &Service{
 		Name: "demo.Chat",
 		Methods: []Method{
-			Stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
+			stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
 				return errs.New("the chat is closed").WithCode("chat.closed").WithStatus(503)
 			}),
 		},
 	}
 	addr := startTestServer(t, svc)
 
-	client, err := NewClient("demo.Chat", WithDirect(addr))
+	client, err := newClient("demo.Chat", withDirect(addr))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
 
-	chat := StreamDoer[streamChatReq, streamChatResp](client, "Chat")
+	chat := streamDoer[streamChatReq, streamChatResp](client, "Chat")
 	stream, err := chat(context.Background())
 	if err != nil {
 		t.Fatalf("open the stream: %v", err)
@@ -120,7 +120,7 @@ func TestStreamStopsWhenTheClientDisconnects(t *testing.T) {
 	svc := &Service{
 		Name: "demo.Chat",
 		Methods: []Method{
-			Stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
+			stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
 				for {
 					if _, err := s.Recv(); err != nil {
 						done <- err
@@ -132,11 +132,11 @@ func TestStreamStopsWhenTheClientDisconnects(t *testing.T) {
 	}
 	addr := startTestServer(t, svc)
 
-	client, err := NewClient("demo.Chat", WithDirect(addr))
+	client, err := newClient("demo.Chat", withDirect(addr))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
-	chat := StreamDoer[streamChatReq, streamChatResp](client, "Chat")
+	chat := streamDoer[streamChatReq, streamChatResp](client, "Chat")
 	stream, err := chat(context.Background())
 	if err != nil {
 		t.Fatalf("open the stream: %v", err)

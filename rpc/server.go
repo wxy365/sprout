@@ -21,8 +21,7 @@ import (
 
 // Server 是一个 gRPC 服务端实例。它随应用一起启动，随应用一起停止。
 //
-// The exported alias Server is declared in api.go, which collects the public
-// API surface of the package.
+// See server.go for the implementation.
 type Server struct {
 	// Name 是服务端名称，用于挂载服务与配置匹配。
 	Name string
@@ -58,7 +57,7 @@ type serverCfg struct {
 //
 // The exported wrapper NewServer is declared in api.go, which collects the
 // public API surface of the package.
-func NewServer(name string) *Server {
+func newServer(name string) *Server {
 	s := &Server{Name: name, ShutdownTimeout: 10 * time.Second}
 	s.applyConfig()
 	return s
@@ -68,7 +67,7 @@ func NewServer(name string) *Server {
 //
 // The exported wrapper ServersFromConfig is declared in api.go, which collects
 // the public API surface of the package.
-func ServersFromConfig() []*Server {
+func serversFromConfig() []*Server {
 	cfgs, err := def.GetObj[[]serverCfg]("app.grpc_servers")
 	if err != nil {
 		return nil
@@ -78,7 +77,7 @@ func ServersFromConfig() []*Server {
 		if c.Name == "" {
 			log.Panic("The gRPC server name must not be empty! Please check the configuration files.")
 		}
-		servers = append(servers, NewServer(c.Name))
+		servers = append(servers, newServer(c.Name))
 	}
 	return servers
 }
@@ -222,7 +221,7 @@ func (s *Server) Stop(ctx context.Context) error {
 //
 // The exported wrapper Mount is declared in api.go, which collects the public
 // API surface of the package.
-func Mount[C any](svc *Service, a *sp.App[C], svrName ...string) {
+func mount[C any](svc *Service, a *sp.App[C], svrName ...string) {
 	a.Initializers = append(a.Initializers, func(app *sp.App[C]) error {
 		target, err := findServer(app, svc.Name, svrName...)
 		if err != nil {

@@ -14,8 +14,7 @@ const registryScheme = "sprout"
 
 // Instance 是一个服务提供者实例。
 //
-// The exported alias Instance is declared in api.go, which collects the public
-// API surface of the package.
+// See resolver.go for the implementation.
 type Instance struct {
 	// Addr 是实例地址，形如 host:port。
 	Addr string
@@ -29,8 +28,7 @@ type Instance struct {
 
 // Registry 把服务名解析为服务提供者实例列表。
 //
-// The exported alias Registry is declared in api.go, which collects the public
-// API surface of the package.
+// See resolver.go for the implementation.
 type Registry interface {
 	// Discover 订阅指定服务的实例列表，返回实例更新的通道。通道关闭表示订阅结束。
 	Discover(ctx context.Context, service string) (<-chan []Instance, error)
@@ -40,7 +38,7 @@ type Registry interface {
 //
 // The exported wrapper WithRegistry is declared in api.go, which collects the
 // public API surface of the package.
-func WithRegistry(r Registry) ClientOption {
+func withRegistry(r Registry) ClientOption {
 	return func(o *clientOptions) {
 		o.registry = r
 	}
@@ -50,7 +48,7 @@ func WithRegistry(r Registry) ClientOption {
 //
 // The exported wrapper WithRegistryService is declared in api.go, which
 // collects the public API surface of the package.
-func WithRegistryService(name string) ClientOption {
+func withRegistryService(name string) ClientOption {
 	return func(o *clientOptions) {
 		o.registryService = name
 	}

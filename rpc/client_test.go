@@ -12,13 +12,13 @@ import (
 func TestClientCallsTheUnaryMethod(t *testing.T) {
 	addr := startTestServer(t, helloService())
 
-	client, err := NewClient("demo.Greeter", WithDirect(addr))
+	client, err := newClient("demo.Greeter", withDirect(addr))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
 
-	hello := Doer[svcHelloReq, svcHelloResp](client, "Hello")
+	hello := doer[svcHelloReq, svcHelloResp](client, "Hello")
 	resp, err := hello(context.Background(), &svcHelloReq{Name: "wxy"})
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -32,20 +32,20 @@ func TestClientRestoresTheBusinessError(t *testing.T) {
 	svc := &Service{
 		Name: "demo.Greeter",
 		Methods: []Method{
-			Unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
+			unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
 				return nil, errs.New("the name is required").WithCode("guest.name.required").WithStatus(400)
 			}),
 		},
 	}
 	addr := startTestServer(t, svc)
 
-	client, err := NewClient("demo.Greeter", WithDirect(addr))
+	client, err := newClient("demo.Greeter", withDirect(addr))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
 
-	hello := Doer[svcHelloReq, svcHelloResp](client, "Hello")
+	hello := doer[svcHelloReq, svcHelloResp](client, "Hello")
 	_, err = hello(context.Background(), &svcHelloReq{})
 	if err == nil {
 		t.Fatalf("the handler error should be reported to the caller")
@@ -63,7 +63,7 @@ func TestClientRestoresTheBusinessError(t *testing.T) {
 }
 
 func TestClientNeedsAnAddress(t *testing.T) {
-	if _, err := NewClient("demo.Greeter"); err == nil {
+	if _, err := newClient("demo.Greeter"); err == nil {
 		t.Errorf("a client without an address should be rejected")
 	}
 }
@@ -71,13 +71,13 @@ func TestClientNeedsAnAddress(t *testing.T) {
 func TestClientAppliesTheTimeout(t *testing.T) {
 	addr := startTestServer(t, helloService())
 
-	client, err := NewClient("demo.Greeter", WithDirect(addr), WithTimeout(50*time.Millisecond))
+	client, err := newClient("demo.Greeter", withDirect(addr), withTimeout(50*time.Millisecond))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
 
-	hello := Doer[svcHelloReq, svcHelloResp](client, "Hello")
+	hello := doer[svcHelloReq, svcHelloResp](client, "Hello")
 	// The timeout is short but the server answers immediately, so the call
 	// must succeed: the timeout only bounds the call, it does not break it.
 	if _, err := hello(context.Background(), &svcHelloReq{Name: "wxy"}); err != nil {
@@ -86,15 +86,15 @@ func TestClientAppliesTheTimeout(t *testing.T) {
 }
 
 func TestClientRejectsAnUnqualifiedServiceName(t *testing.T) {
-	if _, err := NewClient("Greeter", WithDirect("127.0.0.1:1")); err != nil {
-		t.Errorf("NewClient should not fail on the service name, got %v", err)
+	if _, err := newClient("Greeter", withDirect("127.0.0.1:1")); err != nil {
+		t.Errorf("newClient should not fail on the service name, got %v", err)
 	}
-	client, err := NewClient("Greeter", WithDirect("127.0.0.1:1"))
+	client, err := newClient("Greeter", withDirect("127.0.0.1:1"))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
-	hello := Doer[svcHelloReq, svcHelloResp](client, "Hello")
+	hello := doer[svcHelloReq, svcHelloResp](client, "Hello")
 	if _, err := hello(context.Background(), &svcHelloReq{}); err == nil {
 		t.Errorf("an unqualified service name should be rejected")
 	}

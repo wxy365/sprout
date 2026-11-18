@@ -34,7 +34,7 @@ func TestNacosRegistryDiscoversTheInstances(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	reg, err := NewNacosRegistry(NacosConfig{
+	reg, err := newNacosRegistry(NacosConfig{
 		Servers:  []string{srv.URL},
 		Group:    "DEFAULT_GROUP",
 		Username: "nacos",
@@ -42,7 +42,7 @@ func TestNacosRegistryDiscoversTheInstances(t *testing.T) {
 		Interval: 50 * time.Millisecond,
 	})
 	if err != nil {
-		t.Fatalf("NewNacosRegistry: %v", err)
+		t.Fatalf("newNacosRegistry: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -81,12 +81,12 @@ func TestNacosRegistryPushesTheChanges(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	reg, err := NewNacosRegistry(NacosConfig{
+	reg, err := newNacosRegistry(NacosConfig{
 		Servers:  []string{srv.URL},
 		Interval: 50 * time.Millisecond,
 	})
 	if err != nil {
-		t.Fatalf("NewNacosRegistry: %v", err)
+		t.Fatalf("newNacosRegistry: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -114,7 +114,7 @@ func TestNacosRegistryPushesTheChanges(t *testing.T) {
 }
 
 func TestNacosRegistryNeedsAServer(t *testing.T) {
-	if _, err := NewNacosRegistry(NacosConfig{}); err == nil {
+	if _, err := newNacosRegistry(NacosConfig{}); err == nil {
 		t.Errorf("a Nacos registry without a server should be rejected")
 	}
 }
@@ -126,13 +126,13 @@ func TestClientResolvesTheAddressesFromTheRegistry(t *testing.T) {
 	reg := &fakeRegistry{ch: make(chan []Instance, 1)}
 	reg.ch <- []Instance{{Addr: addr, Healthy: true}}
 
-	client, err := NewClient("demo.Greeter", WithRegistry(reg))
+	client, err := newClient("demo.Greeter", withRegistry(reg))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("newClient: %v", err)
 	}
 	defer client.Close()
 
-	hello := Doer[svcHelloReq, svcHelloResp](client, "Hello")
+	hello := doer[svcHelloReq, svcHelloResp](client, "Hello")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	resp, err := hello(ctx, &svcHelloReq{Name: "wxy"})

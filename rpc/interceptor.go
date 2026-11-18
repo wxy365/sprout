@@ -14,14 +14,12 @@ import (
 
 // UnaryInterceptor 拦截一元调用。
 //
-// The exported alias UnaryInterceptor is declared in api.go, which collects
-// the public API surface of the package.
+// See interceptor.go for the implementation.
 type UnaryInterceptor = grpc.UnaryServerInterceptor
 
 // StreamInterceptor 拦截流式调用。
 //
-// The exported alias StreamInterceptor is declared in api.go, which collects
-// the public API surface of the package.
+// See interceptor.go for the implementation.
 type StreamInterceptor = grpc.StreamServerInterceptor
 
 // clientIDMetadataKey 是承载客户端标识的元数据键。

@@ -12,8 +12,7 @@ import (
 
 // ServerStream 是服务端的双向流句柄。业务逻辑通过它收发消息。
 //
-// The exported alias ServerStream is declared in api.go, which collects the
-// public API surface of the package.
+// See stream.go for the implementation.
 type ServerStream[I any, O any] struct {
 	// stream 是底层的 grpc 流。
 	stream grpc.ServerStream
@@ -52,8 +51,7 @@ func (s *ServerStream[I, O]) Context() context.Context {
 
 // ClientStream 是客户端的双向流句柄。
 //
-// The exported alias ClientStream is declared in api.go, which collects the
-// public API surface of the package.
+// See stream.go for the implementation.
 type ClientStream[I any, O any] struct {
 	// stream 是底层的 grpc 流。
 	stream grpc.ClientStream
@@ -111,7 +109,7 @@ type streamMethod[I any, O any] struct {
 //
 // The exported wrapper Stream is declared in api.go, which collects the
 // public API surface of the package.
-func Stream[I, O any](name string, handler func(ctx *Context, stream *ServerStream[I, O]) error) Method {
+func stream[I, O any](name string, handler func(ctx *Context, stream *ServerStream[I, O]) error) Method {
 	return &streamMethod[I, O]{name: name, handler: handler}
 }
 

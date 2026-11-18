@@ -38,7 +38,7 @@ func helloService() *Service {
 	return &Service{
 		Name: "demo.Greeter",
 		Methods: []Method{
-			Unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
+			unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
 				return &svcHelloResp{Greeting: "hello " + in.Name}, nil
 			}),
 		},
@@ -79,7 +79,7 @@ func TestServerReportsTheHandlerError(t *testing.T) {
 	svc := &Service{
 		Name: "demo.Greeter",
 		Methods: []Method{
-			Unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
+			unary("Hello", func(ctx *Context, in *svcHelloReq) (*svcHelloResp, error) {
 				return nil, errs.New("the name is required").WithCode("guest.name.required").WithStatus(400)
 			}),
 		},
@@ -124,7 +124,7 @@ func TestServerValidatesTheInput(t *testing.T) {
 	svc := &Service{
 		Name: "demo.Validated",
 		Methods: []Method{
-			Unary("Hello", func(ctx *Context, in *validatedReq) (*validatedResp, error) {
+			unary("Hello", func(ctx *Context, in *validatedReq) (*validatedResp, error) {
 				return &validatedResp{Ok: true}, nil
 			}),
 		},
@@ -158,7 +158,7 @@ func TestMountFindsTheServerByName(t *testing.T) {
 	srv := &Server{Name: "grpc"}
 	app.Runners = append(app.Runners, srv)
 
-	Mount(helloService(), app, "grpc")
+	mount(helloService(), app, "grpc")
 	if len(app.Initializers) != 1 {
 		t.Fatalf("the initializers = %d, want 1", len(app.Initializers))
 	}
@@ -172,7 +172,7 @@ func TestMountFindsTheServerByName(t *testing.T) {
 
 func TestMountReportsTheMissingServer(t *testing.T) {
 	app := &sp.App[struct{}]{}
-	Mount(helloService(), app, "missing")
+	mount(helloService(), app, "missing")
 	err := app.Initializers[0](app)
 	if err == nil {
 		t.Fatalf("mounting to a missing server should fail")

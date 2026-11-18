@@ -40,7 +40,7 @@ type NacosConfig struct {
 //
 // The exported wrapper WithNacos is declared in api.go, which collects the
 // public API surface of the package.
-func WithNacos(cfg NacosConfig) ClientOption {
+func withNacos(cfg NacosConfig) ClientOption {
 	return func(o *clientOptions) {
 		o.registryService = cfg.Service
 		o.nacos = &cfg
@@ -63,7 +63,7 @@ type nacosRegistry struct {
 //
 // The exported wrapper NewNacosRegistry is declared in api.go, which collects
 // the public API surface of the package.
-func NewNacosRegistry(cfg NacosConfig) (Registry, error) {
+func newNacosRegistry(cfg NacosConfig) (Registry, error) {
 	if len(cfg.Servers) == 0 {
 		return nil, errs.New("The Nacos registry has no server")
 	}

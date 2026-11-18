@@ -16,8 +16,7 @@ import (
 
 // Context 是 gRPC 调用的上下文。
 //
-// The exported alias Context is declared in api.go, which collects the public
-// API surface of the package.
+// See service.go for the implementation.
 type Context struct {
 	context.Context
 	// md 是调用方传入的元数据。
@@ -41,8 +40,7 @@ const (
 
 // Method 描述一个 gRPC 方法。由 Unary 与 Stream 构造，不直接实例化。
 //
-// The exported alias Method is declared in api.go, which collects the public
-// API surface of the package.
+// See service.go for the implementation.
 type Method interface {
 	// methodName 返回方法名。
 	methodName() string
@@ -57,8 +55,7 @@ type Method interface {
 
 // Service 描述一个 gRPC 服务及其方法。
 //
-// The exported alias Service is declared in api.go, which collects the public
-// API surface of the package.
+// See service.go for the implementation.
 type Service struct {
 	// Name 是服务的全限定名，例如 "demo.Greeter"。
 	Name string
@@ -76,7 +73,7 @@ type unaryMethod[I any, O any] struct {
 //
 // The exported wrapper Unary is declared in api.go, which collects the public
 // API surface of the package.
-func Unary[I, O any](name string, handler func(ctx *Context, in *I) (*O, error)) Method {
+func unary[I, O any](name string, handler func(ctx *Context, in *I) (*O, error)) Method {
 	return &unaryMethod[I, O]{name: name, handler: handler}
 }
 
