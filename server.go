@@ -135,14 +135,16 @@ type epSig struct {
 	pattern string
 }
 
-func (s *httpServer) buildInputEntityValidateFuncs(inputType reflect.Type) objectValidateFunc {
+// buildInputEntityValidateFuncs 按给定的校验器列表构建入参类型的校验函数。
+// 它不依赖具体的服务器，因此可以被其它传输方式（例如 gRPC）复用。
+func buildInputEntityValidateFuncs(validators []validator, inputType reflect.Type) objectValidateFunc {
 	fieldVdFuncs := make([]validateFunc, inputType.NumField())
 	for i := 0; i < inputType.NumField(); i++ {
 		f := inputType.Field(i)
 		validateTag := f.Tag.Get("validate")
 		validateTag = strings.TrimSpace(validateTag)
 		if validateTag != "" {
-			for _, v := range s.Validators {
+			for _, v := range validators {
 				if vdFunc := v.ValidateFunc(validateTag, i, inputType); vdFunc != nil {
 					if fieldVdFuncs[i] == nil {
 						fieldVdFuncs[i] = vdFunc
@@ -165,7 +167,7 @@ func (s *httpServer) buildInputEntityValidateFuncs(inputType reflect.Type) objec
 			fieldType = fieldType.Elem()
 		}
 		if fieldType.Kind() == reflect.Struct {
-			nestVdFunc := s.buildInputEntityValidateFuncs(fieldType)
+			nestVdFunc := buildInputEntityValidateFuncs(validators, fieldType)
 			if nestVdFunc != nil {
 				// The nested field may be a nil pointer at request time: in that
 				// case there is nothing to validate, so the nested validation is
@@ -210,6 +212,11 @@ func (s *httpServer) buildInputEntityValidateFuncs(inputType reflect.Type) objec
 		}
 		return nil
 	}
+}
+
+// buildInputEntityValidateFuncs 构建该服务器上入参类型的校验函数。
+func (s *httpServer) buildInputEntityValidateFuncs(inputType reflect.Type) objectValidateFunc {
+	return buildInputEntityValidateFuncs(s.Validators, inputType)
 }
 
 // dereferenceValue dereferences the pointer values of the given value. It

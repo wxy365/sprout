@@ -71,9 +71,18 @@ func newCircuitBreaker(cbs *circuitBreakerSettings) *gobreaker.TwoStepCircuitBre
 	})
 }
 
-// newCircuitBreakerInterceptor creates a circuit breaker with the given Name.
-// If the settings for the breaker is not configured, then the default settings is applied.
-func newCircuitBreakerInterceptor(breakerName string) interceptorFunc {
+// circuitBreakerGuard 封装熔断器的放行与结果上报。
+// 它不依赖具体的传输方式，因此可以被 HTTP 与 gRPC 共用。
+//
+// The exported alias CircuitBreakerGuard is declared in api.go, which collects
+// the public API surface of the package.
+type circuitBreakerGuard struct {
+	breaker *gobreaker.TwoStepCircuitBreaker
+}
+
+// newCircuitBreakerGuard 按名称创建熔断守卫，配置取自 app.breakers。
+// 未配置时使用默认配置。
+func newCircuitBreakerGuard(breakerName string) *circuitBreakerGuard {
 	cbs := getCircuitBreakerSettings(breakerName)
 	if cbs == nil {
 		cbs = &circuitBreakerSettings{
@@ -84,10 +93,21 @@ func newCircuitBreakerInterceptor(breakerName string) interceptorFunc {
 			MaxFailureRatio:        0.6,
 		}
 	}
-	breaker := newCircuitBreaker(cbs)
+	return &circuitBreakerGuard{breaker: newCircuitBreaker(cbs)}
+}
+
+// Allow 放行一次调用，返回的结果上报函数用于标记本次调用是否成功。
+func (g *circuitBreakerGuard) Allow() (func(bool), error) {
+	return g.breaker.Allow()
+}
+
+// newCircuitBreakerInterceptor creates a circuit breaker with the given Name.
+// If the settings for the breaker is not configured, then the default settings is applied.
+func newCircuitBreakerInterceptor(breakerName string) interceptorFunc {
+	guard := newCircuitBreakerGuard(breakerName)
 	return func(next func(ctx *requestContext) error) func(ctx *requestContext) error {
 		return func(ctx *requestContext) error {
-			done, err := breaker.Allow()
+			done, err := guard.Allow()
 			if err != nil {
 				return errCircuitBroken
 			}
@@ -145,16 +165,29 @@ func registerClientIdentifier(name string, identifier clientIdentifierFunc) {
 	clientIdentifiersMu.Unlock()
 }
 
-// The rate limiter controls the traffic at both the client and the server interface simultaneously
+// rateLimiterGuard 封装令牌桶的放行判断。
+// 它不依赖具体的传输方式：客户端维度的标识由调用方给出，因此 HTTP 与 gRPC
+// 都可以复用同一份限流配置与判定逻辑。
 //
-// A limiter that is not configured is not applied to the client side at all. A
-// limiter that is configured applies the client side limit only when a client
-// token rate is set, because a limiter without a token rate rejects every
-// request.
-func newRateLimiterInterceptor(limiterName string) interceptorFunc {
+// The exported alias RateLimiterGuard is declared in api.go, which collects
+// the public API surface of the package.
+type rateLimiterGuard struct {
+	// serverLimiter 是服务端维度的令牌桶。
+	serverLimiter *rate.Limiter
+	// clientLimiters 是客户端维度的令牌桶缓存，未启用客户端维度限流时为 nil。
+	clientLimiters *cache.Cache
+	// clientTokenRate 是客户端维度的令牌生成速率。
+	clientTokenRate rate.Limit
+	// clientTokenBucketSize 是客户端维度的令牌桶容量。
+	clientTokenBucketSize int
+	// defaultExpiration 是客户端令牌桶的过期时长。
+	defaultExpiration time.Duration
+}
+
+// newRateLimiterGuard 按名称创建限流守卫，配置取自 app.limiters。
+// 未配置时使用默认配置。
+func newRateLimiterGuard(limiterName string) *rateLimiterGuard {
 	rls := getRateLimiterSettings(limiterName)
-	var clientLimiters *cache.Cache
-	defaultExpiration := time.Second
 	if rls == nil {
 		rls = &rateLimiterSettings{
 			TokenRate:       500,
@@ -171,17 +204,56 @@ func newRateLimiterInterceptor(limiterName string) interceptorFunc {
 		// that is not specified falls back to the token rate.
 		rls.TokenBucketSize = fallbackTokenBucketSize(rls.TokenRate, rls.TokenBucketSize)
 		rls.ClientTokenBucketSize = fallbackTokenBucketSize(rls.ClientTokenRate, rls.ClientTokenBucketSize)
-		if rls.ClientTokenRate > 0 {
-			if rls.ClientTokenRate < 1 {
-				defaultExpiration = time.Second * time.Duration(1/rls.ClientTokenRate)
-			}
-			clientLimiters = cache.New(defaultExpiration, time.Second)
-		}
 	}
-	serverLimiter := rate.NewLimiter(rls.TokenRate, rls.TokenBucketSize)
+	g := &rateLimiterGuard{
+		serverLimiter:          rate.NewLimiter(rls.TokenRate, rls.TokenBucketSize),
+		clientTokenRate:        rls.ClientTokenRate,
+		clientTokenBucketSize:  rls.ClientTokenBucketSize,
+		defaultExpiration:      time.Second,
+	}
+	if rls.ClientTokenRate > 0 {
+		if rls.ClientTokenRate < 1 {
+			g.defaultExpiration = time.Second * time.Duration(1/rls.ClientTokenRate)
+		}
+		g.clientLimiters = cache.New(g.defaultExpiration, time.Second)
+	}
+	return g
+}
 
+// Allow 放行一次调用。clientIdentity 为空表示不做客户端维度的限流。
+func (g *rateLimiterGuard) Allow(clientIdentity string) bool {
+	if !g.serverLimiter.Allow() {
+		return false
+	}
+	if g.clientLimiters == nil || clientIdentity == "" {
+		return true
+	}
+	var clientLimiter *rate.Limiter
+	if cached, exists := g.clientLimiters.Get(clientIdentity); exists {
+		clientLimiter = cached.(*rate.Limiter)
+	}
+	if clientLimiter == nil {
+		clientLimiter = rate.NewLimiter(g.clientTokenRate, g.clientTokenBucketSize)
+		g.clientLimiters.Set(clientIdentity, clientLimiter, g.defaultExpiration)
+	}
+	return clientLimiter.Allow()
+}
+
+// The rate limiter controls the traffic at both the client and the server interface simultaneously
+//
+// A limiter that is not configured is not applied to the client side at all. A
+// limiter that is configured applies the client side limit only when a client
+// token rate is set, because a limiter without a token rate rejects every
+// request.
+func newRateLimiterInterceptor(limiterName string) interceptorFunc {
+	guard := newRateLimiterGuard(limiterName)
+
+	var identifierType string
+	if rls := getRateLimiterSettings(limiterName); rls != nil {
+		identifierType = rls.ClientIdentifierType
+	}
 	clientIdentifiersMu.RLock()
-	clientIdentifier := clientIdentifiers[rls.ClientIdentifierType]
+	clientIdentifier := clientIdentifiers[identifierType]
 	clientIdentifiersMu.RUnlock()
 	if clientIdentifier == nil {
 		clientIdentifier = tp.GetClientIp
@@ -189,22 +261,12 @@ func newRateLimiterInterceptor(limiterName string) interceptorFunc {
 
 	return func(next func(ctx *requestContext) error) func(ctx *requestContext) error {
 		return func(ctx *requestContext) error {
-			if !serverLimiter.Allow() {
-				return errRateLimited
+			var clientIdentity string
+			if guard.clientLimiters != nil {
+				clientIdentity = clientIdentifier(ctx.Request)
 			}
-			if clientLimiters != nil {
-				clientIdentity := clientIdentifier(ctx.Request)
-				var clientLimiter *rate.Limiter
-				if cached, exists := clientLimiters.Get(clientIdentity); exists {
-					clientLimiter = cached.(*rate.Limiter)
-				}
-				if clientLimiter == nil {
-					clientLimiter = rate.NewLimiter(rls.ClientTokenRate, rls.ClientTokenBucketSize)
-					clientLimiters.Set(clientIdentity, clientLimiter, defaultExpiration)
-				}
-				if !clientLimiter.Allow() {
-					return errRateLimited
-				}
+			if !guard.Allow(clientIdentity) {
+				return errRateLimited
 			}
 			return next(ctx)
 		}

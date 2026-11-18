@@ -11,6 +11,7 @@ package sprout
 
 import (
 	"net/http"
+	"reflect"
 )
 
 type (
@@ -151,6 +152,18 @@ type (
 	//
 	// See sse.go for the implementation.
 	SSEEndpoint[I any] = sseEndpoint[I]
+	// CircuitBreakerGuard wraps the circuit breaker, which decides whether a
+	// call is allowed and reports the result of that call. It is transport
+	// agnostic, so it is shared by the HTTP and the gRPC interceptors.
+	//
+	// See interceptor.go for the implementation.
+	CircuitBreakerGuard = circuitBreakerGuard
+	// RateLimiterGuard wraps the token buckets, which decide whether a call is
+	// allowed. It is transport agnostic, so it is shared by the HTTP and the
+	// gRPC interceptors.
+	//
+	// See interceptor.go for the implementation.
+	RateLimiterGuard = rateLimiterGuard
 )
 
 const (
@@ -254,4 +267,37 @@ func SerializeMultipartForm(model any, w http.ResponseWriter) error {
 // See message_converter.go for the implementation.
 func DeserializeMultipartForm(r *http.Request, model any) error {
 	return deserializeMultipartForm(r, model)
+}
+
+// DefaultValidators returns the validators that the framework applies by
+// default to the input of an endpoint.
+//
+// See validator.go for the implementation.
+func DefaultValidators() []Validator {
+	return defaultValidators()
+}
+
+// BuildInputEntityValidateFuncs builds the validation function of the given
+// input type with the given validators. It is exported so that the other
+// transports of the framework, such as gRPC, can reuse the validation rules.
+//
+// See server.go for the implementation.
+func BuildInputEntityValidateFuncs(validators []Validator, inputType reflect.Type) ObjectValidateFunc {
+	return buildInputEntityValidateFuncs(validators, inputType)
+}
+
+// NewCircuitBreakerGuard creates a circuit breaker guard with the given name.
+// The settings are read from the app.breakers configuration.
+//
+// See interceptor.go for the implementation.
+func NewCircuitBreakerGuard(name string) *CircuitBreakerGuard {
+	return newCircuitBreakerGuard(name)
+}
+
+// NewRateLimiterGuard creates a rate limiter guard with the given name.
+// The settings are read from the app.limiters configuration.
+//
+// See interceptor.go for the implementation.
+func NewRateLimiterGuard(name string) *RateLimiterGuard {
+	return newRateLimiterGuard(name)
 }
