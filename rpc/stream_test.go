@@ -116,11 +116,13 @@ func TestStreamReportsTheServerError(t *testing.T) {
 }
 
 func TestStreamStopsWhenTheClientDisconnects(t *testing.T) {
+	started := make(chan struct{})
 	done := make(chan error, 1)
 	svc := &Service{
 		Name: "demo.Chat",
 		Methods: []Method{
 			stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
+				close(started)
 				for {
 					if _, err := s.Recv(); err != nil {
 						done <- err
@@ -144,6 +146,18 @@ func TestStreamStopsWhenTheClientDisconnects(t *testing.T) {
 	if err := stream.Send(&streamChatReq{Text: "a"}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
+
+	// The handler is only invoked once the server has accepted the stream. A
+	// client that goes away before that happens leaves the server without a
+	// stream to observe at all, so wait for the handler before closing the
+	// client. Otherwise the assertion below depends on a race between the
+	// client and the server.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the server did not start the handler")
+	}
+
 	client.Close()
 
 	select {
