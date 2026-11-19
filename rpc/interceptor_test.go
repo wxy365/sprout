@@ -42,10 +42,19 @@ func TestTheServerRecoversThePanic(t *testing.T) {
 }
 
 func TestTheServerRecoversThePanicOfTheStream(t *testing.T) {
+	started := make(chan struct{})
 	svc := &Service{
 		Name: "demo.Chat",
 		Methods: []Method{
 			stream("Chat", func(ctx *Context, s *ServerStream[streamChatReq, streamChatResp]) error {
+				close(started)
+				// Wait for a message before the panic. The panic tears the
+				// stream down, so a message that is sent while the handler
+				// is already panicking races against that teardown and the
+				// send may fail with io.EOF.
+				if _, err := s.Recv(); err != nil {
+					return err
+				}
 				panic("boom")
 			}),
 		},
@@ -63,6 +72,15 @@ func TestTheServerRecoversThePanicOfTheStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the stream: %v", err)
 	}
+
+	// The handler is only invoked once the server has accepted the stream, so
+	// wait for it before sending.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the server did not start the handler")
+	}
+
 	if err := stream.Send(&streamChatReq{Text: "a"}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
